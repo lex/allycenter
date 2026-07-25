@@ -32,6 +32,9 @@ By installing or using it you accept that:
 
 If you are not comfortable with that, do not install it.
 
+> Screenshots below predate the Fan Curve, Monitoring, Power Preference and Boot Sound
+> sections and do not show them.
+
 ![AllyCenter Screenshot](images/1.png)
 ![AllyCenter Screenshot](images/2.png)
 ![AllyCenter Screenshot](images/3.png)
@@ -55,17 +58,49 @@ Turn off the display for background downloads to save battery. When enabled:
 - **Use External TDP** - Disable Ally Center's TDP management to use SimpleDeckyTDP or other plugins
 - **Performance Presets** - Quick switch between Download (7W), Silent (15W), Performance (25W), and Turbo (30W) modes
 - **TDP Override** - Manually set TDP from 7W to 35W with fine-grained control
-- **Fan Mode** - Choose between Auto, Quiet, Balanced, and Performance fan profiles
-- **Live Monitoring** - View current CPU and GPU temperatures in real-time
+- **Fan Mode** - Choose between Auto, Quiet, Balanced, and Performance profiles
+- **Apply On Startup** - Re-apply saved settings to the hardware at boot (see below)
 
 TDP is applied as the firmware's three-stage limit (sustained / slow boost / fast boost)
-rather than a single number, and is clamped to the range the firmware actually accepts —
-the kernel interface silently accepts out-of-range values without applying them.
+rather than a single number, and is clamped to the range the driver actually accepts.
+Those limits differ per model *and* per power source, so they are read from the driver at
+the moment of writing rather than hardcoded — the kernel interface otherwise accepts
+out-of-range values and silently ignores them.
+
+Fan Mode writes the ACPI platform profile, which is the same setting as SteamOS's
+own **Performance Profile**. Changing it here changes it there, and vice versa. The
+plugin never writes it automatically, so a choice made in SteamOS is not overridden.
+
+### Fan Curve
+
+- **Two independent 8-point curves** - separate CPU and GPU fan control
+- **Per-point sliders** showing the temperature and resulting fan speed
+- **Restore Stock Curve** - one press to hand control back to the firmware
+
+Points are clamped and forced non-decreasing, so a curve can never request less airflow
+at a higher temperature. Nothing else on the device offers curve editing — SteamOS
+reports fan control as BIOS-managed only.
+
+### Monitoring
+
+Live sensor readout, polled only while the section is open:
+
+- APU package power draw
+- CPU, GPU and SSD temperatures
+- GPU usage and clock
+- Both fan speeds (CPU and GPU) in RPM
+- Charger wattage when running on AC
 
 ### CPU Settings
 
 - **SMT (Hyper-Threading)** - Toggle on/off for better single-thread performance in some games
 - **CPU Boost** - Disable to reduce heat and power consumption
+- **Power Preference** - amd-pstate energy/performance bias, from Performance through to
+  Maximum battery. Applied to every CPU core, and independent of the TDP limit
+- **Boot Sound** - Toggle the ASUS POST chime. This one is stored in firmware, so it
+  persists on its own rather than being re-applied by the plugin
+
+None of these are exposed in the SteamOS UI.
 
 ### Battery
 
@@ -82,6 +117,10 @@ the kernel interface silently accepts out-of-range values without applying them.
 - **Brightness Control** - Adjust LED brightness from 0-100%
 - **Effects** - Static, Pulse, Spectrum, Wave, Flash, Battery Level, or Off
 - **Speed Control** - Adjust animation speed for animated effects
+
+Battery Level uses a kernel LED trigger rather than polling, so it costs nothing while
+active. RGB is re-applied automatically after waking from sleep, because the controller's
+MCU clears the joystick rings across a suspend.
 
 ### Device Info
 
@@ -149,12 +188,19 @@ and are unverified here.
 | Download Mode       | ✅       | ✅         | ✅                        |
 | Performance Presets | ✅       | ✅         | ✅ verified               |
 | TDP Override        | ✅       | ✅         | ✅ verified               |
-| Fan Control         | ✅       | ✅         | ✅ verified               |
+| Fan Mode            | ✅       | ✅         | ✅ verified               |
+| Fan Curve           | ?        | ?          | ✅ verified               |
+| Monitoring          | ?        | ?          | ✅ verified               |
 | CPU Settings        | ✅       | ✅         | ✅                        |
+| Power Preference    | ?        | ?          | ✅                        |
+| Boot Sound          | ?        | ?          | ✅                        |
 | Battery Health      | ✅       | ✅         | ✅ (no temperature)       |
-| Charge Limit        | ✅       | ✅         | ✅ verified               |
+| Charge Limit        | ✅       | ✅         | read-only (SteamOS owns it) |
 | RGB Lighting        | ✅       | ✅         | ✅ verified               |
 | Device Info         | ✅       | ✅         | ✅                        |
+
+Sections whose hardware is missing hide themselves, so an unsupported device simply
+shows fewer controls rather than failing.
 
 ## Settings
 
@@ -164,6 +210,9 @@ they survive a reboot rather than only appearing to. Settings are stored in:
 ```
 ~/homebrew/settings/Ally Center/settings.json
 ```
+
+Power limits are also re-applied after waking from sleep and when the charger is
+connected or disconnected, since the driver tracks limits separately per power source.
 
 ### Startup safety
 

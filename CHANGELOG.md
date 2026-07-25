@@ -2,7 +2,12 @@
 
 All notable changes to Ally Center will be documented in this file.
 
-## [Unreleased] - fork (github.com/lex/allycenter)
+## [2.0.0] - 2026-07-25 — fork (github.com/lex/allycenter)
+
+**Breaking:** the charge limit is now read-only (SteamOS owns that setting), and Fan Mode
+now writes the ACPI platform profile, which is the same control as SteamOS's Performance
+Profile — its values were previously inverted on this hardware.
+
 
 Verified against a ROG Xbox Ally X (RC73XA, Ryzen AI Z2 Extreme, SteamOS 6.16.12).
 See `docs/` for the hardware reference and the analysis behind these decisions.
