@@ -18,6 +18,8 @@ Suspend/resume record across all boots retained in the journal:
 | 17:29:23 | — | **hang** |
 | 19:45:22 | 19:45:51 | resumed after 29 s |
 | 19:55:42 | — | **hang** |
+| 21:30:47 | 21:31:49 | resumed after 62 s (rtcwake test) |
+| 21:33:56 | 21:34:57 | resumed after 59 s (rtcwake test) |
 
 Roughly 50/50. Both failures end at exactly the same journal line and nothing follows:
 
@@ -91,8 +93,11 @@ active during these failures:
 RGB was disabled at both recorded hangs, so no effect thread was running. The hazard
 applies to anyone using an animated effect.
 
-Mitigated regardless: `on_suspend` now stops effect threads on
-`RegisterForOnSuspendRequest`, before the freeze begins.
+Mitigation attempted but **not currently active**: `on_suspend` stops effect threads,
+but it is wired to `SteamClient.System.RegisterForOnSuspendRequest`, which was tested on
+this build and never fires. There is at present no working pre-suspend hook, so the
+hazard stands for animated effects. A `/etc/systemd/system-sleep/` hook would work but
+installs outside the plugin directory.
 
 **The clean experiment**, if the hang recurs: disable the plugin entirely in Decky and
 use the device normally. If sleep still hangs, the plugin is exonerated outright.

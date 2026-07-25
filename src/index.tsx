@@ -1309,8 +1309,11 @@ export default definePlugin(() => {
     <BlackScreenOverlay stateManager={downloadModeState} />
   ));
 
-  // The MCU resets the joystick rings across a suspend/resume cycle, so settings
-  // that were applied before sleep are gone on wake. Re-apply on resume.
+  // NOTE: these SteamClient registrations were tested on SteamOS 6.16.12 and never
+  // fired. Resume is handled by the backend's clock-gap watcher instead, which is
+  // verified working. These are kept because they cost nothing and may fire on other
+  // Steam builds - but nothing depends on them. In particular, the suspend-side
+  // effect-thread cleanup is NOT currently active on this build.
   let resumeRegistration: { unregister: () => void } | undefined;
   let suspendRegistration: { unregister: () => void } | undefined;
   try {

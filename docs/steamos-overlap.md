@@ -109,6 +109,20 @@ than the name implies — the PPT limits stay wherever the plugin set them.
 Deliberately unused — Steam Input already provides this and duplicating it would create
 two competing sources of truth.
 
+## Suspend/resume: what works
+
+- `SteamClient.System.RegisterForOnResumeFromSuspend` and `RegisterForOnSuspendRequest`
+  were tested on SteamOS 6.16.12 and **never fired**. Do not rely on them.
+- **The MCU wipes the joystick-ring LEDs across suspend**, confirmed by test: after a
+  62 s suspend, `brightness` *and* `multi_intensity` both read `0` — it is not merely a
+  brightness reset. Settings must be re-applied on resume.
+- Power limits and the platform profile *did* survive suspend in testing, but are
+  re-applied anyway since firmware behaviour is not guaranteed.
+- Working detection method: `CLOCK_BOOTTIME` advances while suspended,
+  `CLOCK_MONOTONIC` does not. Polling both and comparing the deltas detects a resume and
+  its duration, with no Steam or DBus dependency. Verified:
+  `Detected resume after 59s suspended`.
+
 ## Persistent ("permanent") LED off
 
 The kernel driver exposes **only runtime** LED state — there are no Aura power-state

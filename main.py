@@ -31,6 +31,10 @@ ALLY_CONTROLLER_PATH = "/sys/devices/platform/asus-nb-wmi"
 CHARGE_LIMIT_PATH = "/sys/class/power_supply/BAT0/charge_control_end_threshold"
 # Authoritative min/max/default for the power limits, published by asus_armoury
 ARMOURY_PATH = "/sys/class/firmware-attributes/asus-armoury/attributes"
+# ACPI platform profile. Same knob as throttle_thermal_policy and as SteamOS's
+# Performance Profile, but addressed by name, which is model-independent.
+PLATFORM_PROFILE_PATH = "/sys/firmware/acpi/platform_profile"
+PLATFORM_PROFILE_CHOICES_PATH = "/sys/firmware/acpi/platform_profile_choices"
 
 # Firmware limits for ppt_pl1_spl. The WMI nodes accept out-of-range values
 # without complaint and let the firmware clamp them, so we clamp here instead.
@@ -78,12 +82,22 @@ class Plugin:
     screen_off: bool = False
     effect_thread: threading.Thread = None
     effect_running: bool = False
+    resume_watcher: threading.Thread = None
+    resume_watcher_running: bool = False
+    loop = None
+
+    # How often to check for a suspend gap, and the smallest gap treated as a
+    # real suspend rather than scheduling jitter.
+    RESUME_POLL_SECONDS = 5
+    RESUME_MIN_SUSPEND_SECONDS = 10
     
     async def _main(self):
         """Main entry point for the plugin"""
         self.settings_path = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
+        self.loop = asyncio.get_running_loop()
         await self.load_settings()
         await self._apply_on_startup()
+        self._start_resume_watcher()
         decky.logger.info("Ally Center initialized")
 
     def _sentinel_path(self) -> str:
@@ -131,6 +145,43 @@ class Plugin:
                     os.remove(sentinel)
             except OSError as e:
                 decky.logger.warning(f"Could not clear startup sentinel: {e}")
+
+    def _start_resume_watcher(self):
+        """Detect resume from suspend without depending on Steam or DBus.
+
+        CLOCK_MONOTONIC does not advance while the system is suspended, but
+        CLOCK_BOOTTIME does. A gap between the two deltas is therefore a suspend
+        that just ended, and its size is how long we were asleep.
+
+        The frontend's SteamClient resume callback was tried first and never fired
+        on this Steam build, so this is the mechanism that actually works.
+        """
+        if self.resume_watcher and self.resume_watcher.is_alive():
+            return
+
+        def watch():
+            last_mono = time.monotonic()
+            last_boot = time.clock_gettime(time.CLOCK_BOOTTIME)
+            while self.resume_watcher_running:
+                time.sleep(self.RESUME_POLL_SECONDS)
+                mono = time.monotonic()
+                boot = time.clock_gettime(time.CLOCK_BOOTTIME)
+                slept = (boot - last_boot) - (mono - last_mono)
+                last_mono, last_boot = mono, boot
+
+                if slept >= self.RESUME_MIN_SUSPEND_SECONDS:
+                    decky.logger.info(f"Detected resume after {slept:.0f}s suspended")
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            self.on_resume(), self.loop
+                        ).result(timeout=30)
+                    except Exception as e:
+                        decky.logger.error(f"Resume re-apply failed: {e}")
+
+        self.resume_watcher_running = True
+        self.resume_watcher = threading.Thread(target=watch, daemon=True)
+        self.resume_watcher.start()
+        decky.logger.info("Resume watcher started")
 
     async def on_suspend(self) -> bool:
         """Stop RGB animation threads before the system suspends.
@@ -244,6 +295,7 @@ class Plugin:
     async def _unload(self):
         """Cleanup when plugin is unloaded"""
         # Stop any running effect
+        self.resume_watcher_running = False
         self._stop_effect()
         # Restore screen if it was off
         if self.screen_off:
@@ -953,6 +1005,16 @@ class Plugin:
         
         return ""
 
+    def _current_fan_mode(self) -> str:
+        """Report the mode the hardware is actually in. SteamOS can change the
+        platform profile behind our back, so stored settings are not the truth."""
+        profile = self._get_platform_profile()
+        for mode, name in self.PLATFORM_PROFILE_NAMES.items():
+            # "auto" also maps to balanced; prefer the explicit "balanced" label
+            if name == profile and mode != "auto":
+                return mode
+        return self.settings.get("fan_mode", "auto")
+
     def _find_hwmon_by_name(self, wanted: str) -> str:
         """Resolve a hwmon device by its name. Never trust hwmon index order -
         acpi_fan also exposes fan1_input and will shadow the ASUS device."""
@@ -972,7 +1034,7 @@ class Plugin:
 
     async def get_fan_info(self) -> dict:
         result = {
-            "mode": self.settings.get("fan_mode", "auto"),
+            "mode": self._current_fan_mode(),
             "speed": 0,
             "cpu_fan": 0,
             "gpu_fan": 0,
@@ -1011,19 +1073,71 @@ class Plugin:
         
         return result
 
+    # Plugin fan modes mapped onto ACPI platform profile names. "auto" has no
+    # distinct profile, so it means balanced.
+    PLATFORM_PROFILE_NAMES = {
+        "quiet": "low-power",
+        "balanced": "balanced",
+        "performance": "performance",
+        "auto": "balanced",
+    }
+
+    def _read_platform_profile_choices(self) -> list:
+        try:
+            with open(PLATFORM_PROFILE_CHOICES_PATH, 'r') as f:
+                return f.read().split()
+        except Exception:
+            return []
+
+    def _set_platform_profile(self, mode: str) -> bool:
+        """Write the ACPI platform profile by name. Returns False if unavailable so
+        the caller can fall back to the numeric thermal policy."""
+        wanted = self.PLATFORM_PROFILE_NAMES.get(mode)
+        if not wanted or not os.path.exists(PLATFORM_PROFILE_PATH):
+            return False
+
+        choices = self._read_platform_profile_choices()
+        if wanted not in choices:
+            decky.logger.warning(
+                f"Platform profile '{wanted}' not offered by this device "
+                f"(choices: {choices or 'none'}), falling back to thermal policy"
+            )
+            return False
+
+        try:
+            with open(PLATFORM_PROFILE_PATH, 'w') as f:
+                f.write(wanted)
+            decky.logger.info(f"Set fan mode: {mode} (platform_profile={wanted})")
+            return True
+        except Exception as e:
+            decky.logger.warning(f"Could not write platform profile: {e}")
+            return False
+
+    def _get_platform_profile(self) -> str:
+        try:
+            with open(PLATFORM_PROFILE_PATH, 'r') as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+
     async def set_fan_mode(self, mode: str) -> bool:
         try:
             self.settings["fan_mode"] = mode
             await self.save_settings()
-            
-            # Verified on RC73XA by writing each value and reading back the ACPI
-            # platform profile, in both directions:
-            #   0 -> balanced, 1 -> performance, 2 -> low-power
-            # The previous mapping had 1 and 2 the other way round, so "Quiet"
-            # actually selected Performance and vice versa.
+
+            # Preferred path: write the ACPI platform profile by name. This is the
+            # same underlying knob as throttle_thermal_policy and as SteamOS's
+            # Performance Profile, but the names are model-independent - the numeric
+            # policy mapping is not, and getting it wrong silently inverts the modes.
+            if self._set_platform_profile(mode):
+                return True
+
+            # Fallback for devices without an ACPI platform profile. This numeric
+            # mapping was verified on RC73XA (0=balanced, 1=performance, 2=low-power)
+            # and may not hold on other models - hence the preference above.
             mode_map = {"quiet": "2", "balanced": "0", "performance": "1", "auto": "0"}
             policy_value = mode_map.get(mode, "0")
-            
+
             # Find and write to throttle_thermal_policy
             policy_path = self._find_throttle_thermal_policy()
             if policy_path:

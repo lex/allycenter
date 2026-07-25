@@ -35,11 +35,17 @@ See `docs/` for the hardware reference and the analysis behind these decisions.
 
 ### New
 
-- **Re-apply settings on resume from suspend.** The MCU resets the joystick rings across
-  a sleep cycle, so RGB was lost on wake even within a single boot.
-- **Stop RGB effect threads before suspend.** Their writes travel over USB HID to the
-  MCU, and a thread caught mid-write when userspace freezes can stall the suspend.
-  Precautionary - not established as a cause of the suspend hang.
+- **Re-apply settings on resume from suspend.** Confirmed by test that the MCU wipes both
+  `brightness` and `multi_intensity` across a sleep cycle, so RGB was lost on every wake.
+  Resume is detected by comparing `CLOCK_BOOTTIME` against `CLOCK_MONOTONIC` - the Steam
+  client's resume callbacks were tried first and never fired on SteamOS 6.16.12.
+- **Fan mode now writes the ACPI platform profile by name** (`low-power`/`balanced`/
+  `performance`) instead of raw numbers into `throttle_thermal_policy`, falling back to
+  the numeric path only where no platform profile exists. The names are model-independent;
+  the numeric mapping is not, and getting it wrong silently inverts the modes.
+- `on_suspend` stops RGB effect threads, whose writes travel over USB HID to the MCU
+  where a thread caught mid-write could stall the freeze. **Not currently active**: it
+  is wired to a Steam callback that does not fire on this build.
 - **"Apply On Startup" toggle** (`apply_on_startup`, default on) in the Performance
   section, which also surfaces when the crash guard has disabled itself.
 - **Crash sentinel.** A marker is written before touching hardware at boot and cleared on
