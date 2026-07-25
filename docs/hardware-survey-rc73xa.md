@@ -110,8 +110,21 @@ change when you plug in.** From `asus-armoury.h` for `RC73XA`:
 Everything recorded in this document was captured **on battery**, so it is the DC set.
 Where a default is unset the driver substitutes another value rather than reporting 0.
 
-Consequence: ranges must be read at the moment of writing, not cached at startup. The
-plugin does this via `_armoury_range()`.
+Verified live: removing the charger changed `ppt_pl2_sppt/min_value` from `14` to `13`
+within a few seconds. The ranges really are swapped at runtime.
+
+**Connecting the charger also discards the applied limits.** Observed: with the plugin
+holding 25/31/38, plugging in left `current_value` reading 35/45/55 — the AC maximums.
+On disconnect the values stayed put, so the reset was only seen on connect, but a
+re-apply is warranted in both directions.
+
+Consequences:
+
+- Ranges must be read at the moment of writing, not cached at startup
+  (`_armoury_range()` does this).
+- Power limits must be **re-applied on charger connect/disconnect**, in the same way
+  they are after resume. The plugin watches `/sys/class/power_supply/AC0/online` in its
+  existing background thread and calls `_reapply_power_limits()` on a change.
 
 ### Limits are per model, too
 

@@ -36,6 +36,7 @@ ARMOURY_PATH = "/sys/class/firmware-attributes/asus-armoury/attributes"
 PLATFORM_PROFILE_PATH = "/sys/firmware/acpi/platform_profile"
 PLATFORM_PROFILE_CHOICES_PATH = "/sys/firmware/acpi/platform_profile_choices"
 CPUFREQ_BASE = "/sys/devices/system/cpu"
+AC_ONLINE_PATH = "/sys/class/power_supply/AC0/online"
 # Kernel LED trigger used for the battery RGB mode, replacing a polling thread.
 # Confirmed present in the trigger list on RC73XA.
 BATTERY_LED_TRIGGER = "BAT0-charging-orange-full-green"
@@ -180,6 +181,7 @@ class Plugin:
         def watch():
             last_mono = time.monotonic()
             last_boot = time.clock_gettime(time.CLOCK_BOOTTIME)
+            last_ac = self._read_ac_online()
             while self.resume_watcher_running:
                 time.sleep(self.RESUME_POLL_SECONDS)
                 mono = time.monotonic()
@@ -195,11 +197,57 @@ class Plugin:
                         ).result(timeout=30)
                     except Exception as e:
                         decky.logger.error(f"Resume re-apply failed: {e}")
+                    last_ac = self._read_ac_online()
+                    continue
+
+                # Connecting or removing the charger resets the power limits -
+                # verified: plugging in jumped pl1/pl2/pl3 straight to 35/45/55,
+                # discarding the 25/31/38 the plugin had applied. The driver also
+                # swaps to a different min/max set, so re-read the range and re-apply.
+                ac = self._read_ac_online()
+                if ac is not None and ac != last_ac:
+                    last_ac = ac
+                    decky.logger.info(
+                        f"Power source changed to {'AC' if ac else 'battery'}, re-applying limits"
+                    )
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            self._reapply_power_limits(), self.loop
+                        ).result(timeout=30)
+                    except Exception as e:
+                        decky.logger.error(f"Power-source re-apply failed: {e}")
 
         self.resume_watcher_running = True
         self.resume_watcher = threading.Thread(target=watch, daemon=True)
         self.resume_watcher.start()
         decky.logger.info("Resume watcher started")
+
+    def _read_ac_online(self):
+        """1 if the charger is connected, 0 if not, None if unreadable."""
+        try:
+            with open(AC_ONLINE_PATH, 'r') as f:
+                return int(f.read().strip())
+        except Exception:
+            return None
+
+    async def _reapply_power_limits(self) -> bool:
+        """Re-apply the configured TDP without touching RGB or the thermal policy.
+
+        Used on charger connect/disconnect, which resets the limits in firmware.
+        """
+        try:
+            if self.settings.get("use_external_tdp"):
+                return False
+            if self.settings.get("tdp_override"):
+                return await self.set_tdp(self.settings.get("custom_tdp", 17))
+
+            profile = self.settings.get("current_profile", "performance")
+            if profile == "download":
+                return False
+            return await self.set_performance_profile(profile, apply_fan=False)
+        except Exception as e:
+            decky.logger.error(f"Failed to re-apply power limits: {e}")
+            return False
 
     async def on_suspend(self) -> bool:
         """Stop RGB animation threads before the system suspends.

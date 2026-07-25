@@ -93,6 +93,12 @@ See `docs/` for the hardware reference and the analysis behind these decisions.
   applying our stored value at startup silently reverted it (80 -> 100).
 - Removed the unused `gpu_clock` field from `PERFORMANCE_PROFILES` - no code read it.
 
+- **Re-apply power limits when the charger is connected or disconnected.** Verified that
+  plugging in discards the configured limits — with 25/31/38 applied, connecting the
+  charger left the firmware reporting 35/45/55. The driver also swaps to a different
+  min/max set on AC (`ppt_pl2_sppt` minimum becomes 14 rather than 13), so the range is
+  re-read as part of re-applying.
+
 ### Verified on hardware
 
 - Power limits applied through firmware-attributes take effect immediately (a 7W limit
