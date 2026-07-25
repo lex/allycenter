@@ -69,6 +69,18 @@ See `docs/` for the hardware reference and the analysis behind these decisions.
   polling effect if the trigger is unavailable. This also removes one of the threads
   identified as a potential suspend hazard.
 
+- **Power limits, boot sound and MCU powersave now write the firmware-attributes
+  interface** (`/sys/class/firmware-attributes/asus-armoury/attributes/<attr>/current_value`)
+  instead of the legacy `asus-nb-wmi` nodes, falling back to the old path where the
+  attribute is absent. The kernel logs a deprecation warning on every legacy write and
+  states the path will be removed, so this is the forward-compatible route.
+- **Power limit ranges are now read from firmware** (`min_value`/`max_value`) rather
+  than hardcoded, so they are correct per model. `get_tdp_settings` reports the real
+  range too — the old hardcoded 5–30 let the UI offer values below the firmware
+  minimum, which were silently ignored.
+- Added `get_pending_reboot`, exposing the firmware-attributes flag, which is how to
+  determine whether armoury writes persist as firmware settings.
+
 ### Changed
 
 - **Fan mode is no longer applied at boot or on resume.** `throttle_thermal_policy` is

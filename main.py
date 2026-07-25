@@ -566,16 +566,13 @@ class Plugin:
     async def _set_mcu_powersave(self, enabled: bool) -> bool:
         """Enable/disable MCU powersave mode to control charging LED blink during sleep"""
         try:
-            mcu_path = os.path.join(ASUS_WMI_PATH, "mcu_powersave")
-            if os.path.exists(mcu_path):
-                value = "1" if enabled else "0"
-                with open(mcu_path, 'w') as f:
-                    f.write(value)
-                decky.logger.info(f"MCU powersave {'enabled' if enabled else 'disabled'}")
+            value = "1" if enabled else "0"
+            via = self._write_platform_attr("mcu_powersave", "mcu_powersave", value)
+            if via:
+                decky.logger.info(f"MCU powersave {'enabled' if enabled else 'disabled'} ({via})")
                 return True
-            else:
-                decky.logger.warning("MCU powersave not available")
-                return False
+            decky.logger.warning("MCU powersave not available")
+            return False
         except PermissionError:
             decky.logger.warning("Permission denied setting MCU powersave")
             return False
@@ -1431,6 +1428,75 @@ class Plugin:
         
         return result
 
+    # ---- firmware-attributes (asus_armoury) --------------------------------
+    # The legacy /sys/devices/platform/asus-nb-wmi/* path still works but the kernel
+    # logs a deprecation warning on every write and says it will be removed. These
+    # helpers prefer the firmware-attributes class and fall back to the old path.
+
+    def _armoury_path(self, name: str, leaf: str = "current_value") -> str:
+        return os.path.join(ARMOURY_PATH, name, leaf)
+
+    def _read_armoury(self, name: str, leaf: str = "current_value"):
+        path = self._armoury_path(name, leaf)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r') as f:
+                return f.read().strip()
+        except Exception:
+            return None
+
+    def _write_armoury(self, name: str, value) -> bool:
+        path = self._armoury_path(name)
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, 'w') as f:
+                f.write(str(value))
+            return True
+        except Exception as e:
+            decky.logger.warning(f"Could not write armoury attribute {name}: {e}")
+            return False
+
+    def _armoury_range(self, name: str, fallback: tuple) -> tuple:
+        """Read (min, max) from firmware rather than hardcoding per model."""
+        lo = self._read_armoury(name, "min_value")
+        hi = self._read_armoury(name, "max_value")
+        try:
+            if lo is not None and hi is not None:
+                return int(lo), int(hi)
+        except ValueError:
+            pass
+        return fallback
+
+    def _write_platform_attr(self, armoury_name: str, legacy_name: str, value) -> str:
+        """Write via firmware-attributes if possible, else the deprecated WMI node.
+        Returns which path was used, or "" on failure."""
+        if self._write_armoury(armoury_name, value):
+            return "armoury"
+
+        legacy = os.path.join(ASUS_WMI_PATH, legacy_name)
+        if os.path.exists(legacy):
+            try:
+                with open(legacy, 'w') as f:
+                    f.write(str(value))
+                return "legacy"
+            except Exception as e:
+                decky.logger.warning(f"Could not write {legacy}: {e}")
+        return ""
+
+    async def get_pending_reboot(self) -> dict:
+        """Whether firmware reports a change needing a reboot to take effect."""
+        value = None
+        path = os.path.join(ARMOURY_PATH, "pending_reboot")
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    value = f.read().strip()
+            except Exception as e:
+                decky.logger.warning(f"Could not read pending_reboot: {e}")
+        return {"available": value is not None, "pending": value == "1"}
+
     async def set_tdp_override(self, enabled: bool) -> bool:
         try:
             self.settings["tdp_override"] = enabled
@@ -1442,10 +1508,13 @@ class Plugin:
             return False
 
     async def get_tdp_settings(self) -> dict:
+        # Range comes from firmware where available; the old hardcoded 5-30 let the
+        # UI offer values below the firmware minimum, which were silently ignored.
+        tdp_min, tdp_max = self._armoury_range("ppt_pl1_spl", (TDP_MIN, TDP_MAX))
         return {
             "tdp": self.settings.get("custom_tdp", 15),
-            "min": 5,
-            "max": 30,
+            "min": tdp_min,
+            "max": tdp_max,
             "tdp_override": self.settings.get("tdp_override", False),
             "use_external_tdp": self.settings.get("use_external_tdp", False),
             "available": os.path.exists(RYZENADJ_PATH) or os.path.exists("/sys/devices/platform/asus-nb-wmi")
@@ -1464,88 +1533,75 @@ class Plugin:
 
     async def set_tdp(self, tdp: int) -> bool:
         try:
-            tdp = max(TDP_MIN, min(TDP_MAX, tdp))
+            # Ranges come from firmware where available, so they are correct per
+            # model rather than hardcoded from one device.
+            pl1_lo, pl1_hi = self._armoury_range("ppt_pl1_spl", (TDP_MIN, TDP_MAX))
+            pl2_lo, pl2_hi = self._armoury_range("ppt_pl2_sppt", TDP_PL2_RANGE)
+            pl3_lo, pl3_hi = self._armoury_range("ppt_pl3_fppt", TDP_PL3_RANGE)
+
+            tdp = max(pl1_lo, min(pl1_hi, tdp))
             self.settings["custom_tdp"] = tdp
             await self.save_settings()
 
             # pl1/pl2/pl3 are a staircase (stock 17/21/26), not one number written
-            # three times. The sysfs nodes accept anything and let the firmware clamp
-            # silently, so the ranges are enforced here.
-            pl2 = max(TDP_PL2_RANGE[0], min(TDP_PL2_RANGE[1], round(tdp * TDP_PL2_RATIO)))
-            pl3 = max(TDP_PL3_RANGE[0], min(TDP_PL3_RANGE[1], round(tdp * TDP_PL3_RATIO)))
+            # three times. The nodes accept anything and let firmware clamp silently,
+            # so the ranges are enforced here.
+            pl2 = max(pl2_lo, min(pl2_hi, round(tdp * TDP_PL2_RATIO)))
+            pl3 = max(pl3_lo, min(pl3_hi, round(tdp * TDP_PL3_RATIO)))
 
-            ppt_values = {
-                "ppt_pl1_spl": tdp,
-                "ppt_pl2_sppt": pl2,
-                "ppt_fppt": pl3,
-                "ppt_apu_sppt": tdp,
-                "ppt_platform_sppt": tdp,
-            }
+            # (armoury name, legacy WMI name, value) - note the fast limit is called
+            # ppt_pl3_fppt through firmware-attributes but ppt_fppt on the old path.
+            limits = [
+                ("ppt_pl1_spl", "ppt_pl1_spl", tdp),
+                ("ppt_pl2_sppt", "ppt_pl2_sppt", pl2),
+                ("ppt_pl3_fppt", "ppt_fppt", pl3),
+            ]
 
             written = []
-            failed = []
-            for name, value in ppt_values.items():
-                ppt_path = os.path.join(ASUS_WMI_PATH, name)
-                if not os.path.exists(ppt_path):
-                    continue
-                try:
-                    with open(ppt_path, 'w') as f:
-                        f.write(str(value))
-                    written.append(f"{name}={value}")
-                except PermissionError:
-                    decky.logger.warning(f"Permission denied writing to {ppt_path}")
-                    failed.append(name)
-                except OSError as e:
-                    decky.logger.warning(f"Rejected write {value} to {ppt_path}: {e}")
-                    failed.append(name)
+            paths_used = set()
+            for armoury_name, legacy_name, value in limits:
+                via = self._write_platform_attr(armoury_name, legacy_name, value)
+                if via:
+                    written.append(f"{armoury_name}={value}")
+                    paths_used.add(via)
+                else:
+                    decky.logger.warning(f"Could not set {armoury_name}")
 
-            # pl1 is the limit that actually governs sustained power; without it
-            # the others are meaningless, so don't claim success.
+            # These two exist only on the legacy path and have no firmware-attributes
+            # equivalent. Write them only if we had to use the legacy path anyway,
+            # so the normal path does not trigger the deprecation warning.
+            if "legacy" in paths_used:
+                for extra in ("ppt_apu_sppt", "ppt_platform_sppt"):
+                    extra_path = os.path.join(ASUS_WMI_PATH, extra)
+                    if os.path.exists(extra_path):
+                        try:
+                            with open(extra_path, 'w') as f:
+                                f.write(str(tdp))
+                            written.append(f"{extra}={tdp}")
+                        except Exception:
+                            pass
+
+            # pl1 governs sustained power; without it the rest is meaningless.
             if any(w.startswith("ppt_pl1_spl=") for w in written):
-                decky.logger.info(f"Set TDP {tdp}W via ASUS WMI ({', '.join(written)})")
-                if failed:
-                    decky.logger.warning(f"Some PPT writes failed: {failed}")
+                via = "+".join(sorted(paths_used))
+                decky.logger.info(f"Set TDP {tdp}W via {via} ({', '.join(written)})")
                 return True
-            
+
             if os.path.exists(RYZENADJ_PATH):
                 tdp_mw = tdp * 1000
                 subprocess.run(
-                    [RYZENADJ_PATH, f"--stapm-limit={tdp_mw}", f"--fast-limit={tdp_mw}", f"--slow-limit={tdp_mw}"],
+                    [RYZENADJ_PATH, f"--stapm-limit={tdp_mw}", f"--fast-limit={tdp_mw}",
+                     f"--slow-limit={tdp_mw}"],
                     capture_output=True
                 )
                 decky.logger.info(f"Set TDP to {tdp}W via ryzenadj")
                 return True
-            
+
             decky.logger.warning("No TDP control method available")
             return False
         except Exception as e:
             decky.logger.error(f"Failed to set TDP: {e}")
             return False
-
-    def _read_charge_limit(self) -> int:
-        """Read the charge limit from hardware. SteamOS owns this setting, so the
-        hardware is the source of truth, not anything we stored."""
-        path = self._find_charge_limit_path()
-        if path:
-            try:
-                with open(path, 'r') as f:
-                    return int(f.read().strip())
-            except Exception as e:
-                decky.logger.warning(f"Could not read charge limit: {e}")
-        return self.settings.get("charge_limit", 100)
-
-    def _find_charge_limit_path(self) -> str:
-        """Locate the charge threshold. It lives on the battery, not asus-nb-wmi."""
-        if os.path.exists(CHARGE_LIMIT_PATH):
-            return CHARGE_LIMIT_PATH
-        # Fall back to scanning power supplies in case BAT0 is named differently
-        ps_base = "/sys/class/power_supply"
-        if os.path.exists(ps_base):
-            for supply in sorted(os.listdir(ps_base)):
-                candidate = os.path.join(ps_base, supply, "charge_control_end_threshold")
-                if os.path.exists(candidate):
-                    return candidate
-        return ""
 
     async def get_charge_limit(self) -> dict:
         path = self._find_charge_limit_path()
@@ -1671,27 +1727,25 @@ class Plugin:
             return False
 
     async def get_boot_sound(self) -> dict:
-        path = os.path.join(ASUS_WMI_PATH, "boot_sound")
-        result = {"enabled": True, "available": os.path.exists(path)}
-        try:
-            if result["available"]:
-                with open(path, 'r') as f:
-                    result["enabled"] = f.read().strip() == "1"
-        except Exception as e:
-            decky.logger.error(f"Failed to read boot sound: {e}")
-        return result
+        value = self._read_armoury("boot_sound")
+        if value is None:
+            path = os.path.join(ASUS_WMI_PATH, "boot_sound")
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r') as f:
+                        value = f.read().strip()
+                except Exception as e:
+                    decky.logger.error(f"Failed to read boot sound: {e}")
+        return {"enabled": value == "1", "available": value is not None}
 
     async def set_boot_sound(self, enabled: bool) -> bool:
         """Toggle the POST beep. Note this is a firmware attribute, so unlike the
         other controls here it persists across reboots by design."""
         try:
-            path = os.path.join(ASUS_WMI_PATH, "boot_sound")
-            if not os.path.exists(path):
+            via = self._write_platform_attr("boot_sound", "boot_sound", "1" if enabled else "0")
+            if not via:
                 decky.logger.warning("Boot sound control not available")
                 return False
-
-            with open(path, 'w') as f:
-                f.write("1" if enabled else "0")
 
             self.settings["boot_sound"] = enabled
             await self.save_settings()
