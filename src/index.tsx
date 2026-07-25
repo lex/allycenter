@@ -1346,7 +1346,7 @@ const AboutModal: VFC<{ closeModal: () => void }> = ({ closeModal }) => {
     >
       <div style={{ textAlign: "center", marginBottom: "12px" }}>
         <div style={{ fontSize: "18px", fontWeight: "bold", color: "#fff" }}>Ally Center</div>
-        <div style={{ fontSize: "12px", color: "#8b929a" }}>Version 1.1.0</div>
+        <div style={{ fontSize: "12px", color: "#8b929a" }}>Version 2.0.0</div>
       </div>
       <div style={{ textAlign: "center" }}>
         <div style={{ color: "#8b929a", fontSize: "11px" }}>Created by</div>
