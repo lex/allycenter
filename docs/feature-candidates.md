@@ -111,6 +111,33 @@ just `cpu0`.
 | Thermal trip points | Read-only (`102 °C` critical / `100 °C` passive). Informational at best |
 | `nv_temp_target` (644, `75`), `cpufv` (200) | Undocumented ASUS nodes; `cpufv` is write-only, so its effect cannot be observed before writing. Excluded under "safe only" |
 
+## Final sweep — remaining subsystems
+
+A second read-only pass over everything not covered above. Recorded so this ground is
+not re-probed.
+
+| Area | Finding |
+|---|---|
+| **Two platform-profile providers** | `/sys/class/platform-profile/` holds `platform-profile-0` (`amd-pmf`) and `platform-profile-1` (`asus-wmi`), both offering `low-power balanced performance` and both tracking the ACPI aggregate. Confirms writing `/sys/firmware/acpi/platform_profile` by name is the correct API — it propagates to both providers |
+| **`amdgpu_pm_info`** | `/sys/kernel/debug/dri/*/amdgpu_pm_info` (root) is richer than hwmon: MCLK *and* SCLK, "average SoC including CPU" power, GPU load, VCN load, clock-gating flags. Debugfs paths are less stable than hwmon, so the plugin uses hwmon; MCLK and VCN load are the only readings not otherwise available |
+| **Ambient light sensor** | **Not present.** `steamosctl get-als-calibration-gain` returns `UnknownInterface 'AmbientLightSensor1'` and the only IIO device is `bmi323-imu`. No auto-brightness possible |
+| **SMU** | `AMDI000A:00/smu_fw_version` = `93.13.0`, `smu_program` = `11`. Informational |
+| **NVMe** | `BIWIN CE980Q41R00-1TB`, firmware `K.5.1.04`, APST (autonomous power state transition) already enabled |
+| **USB4 / dock** | `/sys/bus/thunderbolt/devices/domain0` present. SteamOS owns dock firmware updates (`UpdateDock`) |
+| **HDMI-CEC** | Fully managed by SteamOS (`HdmiCec1`/`HdmiCec2` properties, TV wake/suspend) |
+| **RAM temperature** | `spd5118` SPD sensor exists on i2c (`6-0053`) but registers no hwmon, so no memory temperature is exposed |
+| **Other LEDs** | Only `input1::*` and `input18::*` keyboard lock indicators. Nothing useful |
+| **WiFi** | `WifiPowerManagement1` = `1`, backend `iwd`; SteamOS owns it |
+
+**Conclusion: the safe, reversible surface is now essentially exhausted.** Everything
+remaining is blocked behind one of:
+
+- a write, to resolve semantics (`pwm_enable` on the fan curve; whether `asus_armoury`
+  writes persist across reboot),
+- firmware (`Aura` LED persistence in MCU NVRAM; a BIOS newer than `RC73XA.316` for the
+  `EC0.LID` ACPI defect), or
+- a deliberate decision to duplicate SteamOS or Steam Input.
+
 ## Suggested order
 
 1. Per-fan RPM + power/GPU-busy readouts — pure read, no risk, immediate value.
