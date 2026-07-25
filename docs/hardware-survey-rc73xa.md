@@ -28,7 +28,7 @@ Relevant loaded modules:
 
 ## Power limits (PPT)
 
-Two views of the same firmware state, and they agree:
+Two views of the same firmware, which do **not** report the same current state:
 
 - Write path used by the plugin: `/sys/devices/platform/asus-nb-wmi/ppt_*` (mode 644)
 - Authoritative metadata: `/sys/class/firmware-attributes/asus-armoury/attributes/<attr>/{current_value,min_value,max_value,default_value}`
@@ -51,6 +51,12 @@ Also present, no armoury metadata: `ppt_apu_sppt`, `ppt_platform_sppt`.
 3. At boot the WMI nodes read `5`, which is below every documented minimum. It is not
    established whether this reflects an applied 5W state or an unpushed driver default —
    see Open questions.
+4. **The two interfaces disagree about current state.** After the plugin wrote 25W via
+   WMI, `ppt_pl1_spl` read `25` while armoury's `current_value` still read `17`. Armoury
+   appears to reflect only what was written *through armoury*. Treat armoury as
+   authoritative for `min_value`/`max_value`/`default_value` metadata, and WMI as the
+   runtime state. Whether writing through armoury persists across reboot (as a firmware
+   setting would) is untested — there is no `pending_reboot` indicator on this class.
 
 **Verified effective** (8-thread busy loop, 12 s settle, on battery):
 
@@ -107,11 +113,24 @@ this model.
 
 ## Thermal policy
 
-`/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy` (644): `0` balanced,
-`1` silent, `2` performance. (Values 1/2 are swapped relative to ASUS laptops.)
+`/sys/firmware/acpi/platform_profile` (644), choices `low-power balanced performance`.
+**Prefer this** — the names are model-independent.
 
-`/sys/firmware/acpi/platform_profile`: currently `custom`;
-choices `low-power balanced performance`.
+It is the same knob as `/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy` (644),
+verified in both directions on this model:
+
+| policy | platform profile |
+|---|---|
+| 0 | `balanced` |
+| 1 | `performance` |
+| 2 | `low-power` |
+
+Writing the policy numerically makes `platform_profile` read `custom` for values 1 and 2,
+though `steamosctl` still names them correctly. Writing by name avoids this.
+
+**This is also SteamOS's Performance Profile** (`steamosctl get/set-performance-profile`).
+Anything that writes it automatically will silently revert the user's SteamOS choice.
+See `steamos-overlap.md`.
 
 ## Battery
 
@@ -158,7 +177,9 @@ It has no per-device subdirectories.
   after every boot, or is it an unpushed driver default? Distinguishing requires a
   load test immediately after reboot, before anything writes to the nodes.
 - `pwm1_enable=2` but `pwm2_enable=0` under hwmon `asus`, while `asus_custom_fan_curve`
-  reports `2` for both. Meaning of the mismatch not established.
+  reports `2` for both (both 644). Meaning of the mismatch not established.
+- Whether writing power limits through `asus_armoury` persists across reboot the way a
+  firmware setting would. If it does, it would remove the need to re-apply TDP at boot.
 - Both fans read 0 RPM at idle; not confirmed whether they report real RPM under load.
 - Writing `17` to `ppt_pl2_sppt` via WMI briefly read back as `21` through the armoury
   view, suggesting the two interfaces may not be perfectly coherent on every write.

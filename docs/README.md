@@ -10,6 +10,7 @@ upstream assumptions. All of it was captured on 2026-07-25 from a **ROG Xbox All
 | [`hardware-survey-rc73xa.raw.txt`](hardware-survey-rc73xa.raw.txt) | Raw dump behind the survey, so values can be re-checked without re-probing. |
 | [`steamos-overlap.md`](steamos-overlap.md) | What SteamOS already does, what it can't do here, and which features the plugin should therefore own. Includes the shared-knob analysis. |
 | [`suspend-hang-investigation.md`](suspend-hang-investigation.md) | The sleep/wake failure. Root cause **not** established; records what was ruled in and out. |
+| [`feature-candidates.md`](feature-candidates.md) | Read-only survey of what else could be controlled, with a recommended order and an explicit rejected list. |
 
 ## Read this before changing hardware-facing code
 
@@ -53,5 +54,10 @@ Tracked in the individual documents:
   every boot, or is an unpushed driver default (`hardware-survey-rc73xa.md`).
 - Root cause of the suspend hang (`suspend-hang-investigation.md`).
 - `pwm1_enable=2` / `pwm2_enable=0` mismatch under hwmon `asus`.
-- Whether the resume hook actually fires — untested, because triggering it risks the
-  suspend hang.
+- The meaning of `pwm_enable` values on `asus_custom_fan_curve`, and the `pwm2_enable`
+  mismatch between it and hwmon `asus` (`feature-candidates.md`).
+- Whether writing power limits through `asus_armoury` persists across reboot as a
+  firmware setting would.
+
+Resolved since: the resume hook is verified working (via a backend clock-gap watcher —
+the Steam client callbacks never fire on this build).
