@@ -44,7 +44,7 @@ most valuable feature.
 | Feature | Verdict |
 |---|---|
 | TDP / power limits | **Keep** — SteamOS cannot do it here |
-| Fan mode (`throttle_thermal_policy`) | **Keep** — SteamOS only reports `BIOS` |
+| Fan mode (`throttle_thermal_policy`) | **Keep, but never write unprompted** — it is the *same knob* as SteamOS's Performance Profile |
 | RGB | **Keep** — SteamOS has nothing |
 | Download mode | **Keep** — composite feature, no equivalent |
 | SMT toggle | **Keep** — no SMT method exists in steamos-manager at all |
@@ -55,6 +55,41 @@ most valuable feature.
 
 Note the charge-limit conflict is not hypothetical: applying the plugin's stored
 `charge_limit` at startup silently reverted a value SteamOS had set (80 → 100).
+
+## throttle_thermal_policy IS the SteamOS Performance Profile
+
+`PerformanceProfile1` (`steamosctl get/set-performance-profile`) is the ACPI platform
+profile, and on this device it is backed by
+`/sys/devices/platform/asus-nb-wmi/throttle_thermal_policy` — the same file the plugin
+writes for "Fan Mode". Verified by writing each value and reading the profile back, and
+by setting each profile and reading the policy back:
+
+| `throttle_thermal_policy` | Platform profile |
+|---|---|
+| 0 | `balanced` |
+| 1 | `performance` |
+| 2 | `low-power` |
+
+(Profiles 1 and 2 report `platform_profile = custom` via ACPI while `steamosctl` still
+names them correctly.)
+
+**The plugin's original mapping was inverted**: `{"quiet": "1", "balanced": "0",
+"performance": "2"}` meant selecting Quiet gave Performance and Performance gave
+low-power. Fixed to `{"quiet": "2", "balanced": "0", "performance": "1"}`.
+
+Because it is one shared knob, the plugin must not write it at boot or on resume — doing
+so silently reverted a low-power selection made in SteamOS settings. It is now only
+written when the user explicitly picks a profile or fan mode in the plugin.
+
+### What SteamOS "low-power" actually does
+
+Measured by snapshotting every power-related node at `balanced` and at `low-power`:
+**only `throttle_thermal_policy` changes (0 → 2).** `ppt_pl1/pl2/fppt`, CPU governor,
+EPP, CPU boost, `scaling_max_freq`, and GPU performance level are all byte-identical.
+
+It is a firmware thermal/fan policy hint to the EC, **not** a power limit. Combined with
+SteamOS having no working TDP control on this device, "low-power" does considerably less
+than the name implies — the PPT limits stay wherever the plugin set them.
 
 ## Controller configuration API (not used, documented for reference)
 

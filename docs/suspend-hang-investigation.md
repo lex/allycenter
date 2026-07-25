@@ -73,6 +73,30 @@ BIOS at time of investigation: `RC73XA.316`, dated 2026-02-11.
 - `amd_pmc` debugfs reports `Last S0i3 Status: Unknown/Fail` with all residency counters
   at zero, but this was read on a boot with no suspend attempt, so it is not evidence.
 
+## Could the plugin be causing it?
+
+**Not ruled out, but unsupported by the evidence.** The plugin was loaded and running
+during both *successful* suspends, including the ~4 h one, so its mere presence is not
+the trigger. `mcu_powersave` — the plugin-controlled setting with a known reputation for
+breaking resume on ROG hardware — was `0` at both hangs.
+
+One plausible mechanism remains, and it is worth knowing about even though it was not
+active during these failures:
+
+> The RGB effect threads (`pulse`, `spectrum`, `wave`, `flash`, `battery`) write to the
+> LED node in a loop, and those writes travel over USB HID to the MCU. A thread caught
+> mid-write when the kernel freezes userspace can end up in uninterruptible sleep and
+> stall the freeze — which is precisely the step the hangs stop at.
+
+RGB was disabled at both recorded hangs, so no effect thread was running. The hazard
+applies to anyone using an animated effect.
+
+Mitigated regardless: `on_suspend` now stops effect threads on
+`RegisterForOnSuspendRequest`, before the freeze begins.
+
+**The clean experiment**, if the hang recurs: disable the plugin entirely in Decky and
+use the device normally. If sleep still hangs, the plugin is exonerated outright.
+
 ## Suggested next steps (not yet performed)
 
 1. **Reproduce on demand** with an `rtcwake` loop so failures can be triggered rather

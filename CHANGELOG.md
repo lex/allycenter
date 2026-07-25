@@ -5,13 +5,17 @@ All notable changes to Ally Center will be documented in this file.
 ## [Unreleased] - fork (github.com/lex/allycenter)
 
 Verified against a ROG Xbox Ally X (RC73XA, Ryzen AI Z2 Extreme, SteamOS 6.16.12).
-See `docs/hardware-survey-rc73xa.md`. Backend only — no frontend changes yet.
+See `docs/` for the hardware reference and the analysis behind these decisions.
 
 ### Bug Fixes
 
 - **Settings are now actually applied at startup.** `_main()` only loaded settings and
   never pushed them to hardware, so after a reboot the UI showed your saved values while
-  the device ignored them — most visibly, RGB stayed on after being switched off.
+  the device ignored them - most visibly, RGB stayed on after being switched off.
+- **Fixed inverted fan mode mapping.** `throttle_thermal_policy` was mapped
+  `{quiet: 1, balanced: 0, performance: 2}`, so on this model selecting Quiet actually
+  selected Performance and vice versa. Verified in both directions against the ACPI
+  platform profile: `0 = balanced, 1 = performance, 2 = low-power`.
 - **Fixed charge limit writing to a path that does not exist.** It was looking under
   `asus-nb-wmi`; the real node is `/sys/class/power_supply/BAT0/charge_control_end_threshold`.
   `set_charge_limit` also returned success when it had written nothing.
@@ -20,45 +24,49 @@ See `docs/hardware-survey-rc73xa.md`. Backend only — no frontend changes yet.
   returned a hardcoded 100 and writes always failed.
 - **Fixed TDP being written as one value to all power limits.** pl1/pl2/pl3 are a
   staircase (stock 17/21/26); they are now derived proportionally and clamped to the
-  firmware's real ranges. The old 5–30W clamp allowed 5W, which is below the minimum
+  firmware's real ranges. The old 5-30W clamp allowed 5W, which is below the minimum
   for all three limits and was silently ignored by firmware.
 - **Fixed fan readings coming from the wrong device.** `acpi_fan` also exposes
   `fan1_input` and could win the scan; hwmon is now resolved by name. Both fans
   (`cpu_fan`, `gpu_fan`) are reported.
+- Live APU package power is now reported from `hwmon/amdgpu/power1_input`;
+  `get_current_tdp` previously hardcoded `tdp` to `0`.
 - Removed a duplicate `set_charge_limit` definition that silently shadowed the first.
 
 ### New
 
 - **Re-apply settings on resume from suspend.** The MCU resets the joystick rings across
   a sleep cycle, so RGB was lost on wake even within a single boot.
-- **"Apply On Startup" toggle** in the Performance section, which also surfaces when the
-  crash guard has disabled itself.
-- Live APU package power is now reported from `hwmon/amdgpu/power1_input`; `get_current_tdp`
-  previously hardcoded `tdp` to `0`.
+- **Stop RGB effect threads before suspend.** Their writes travel over USB HID to the
+  MCU, and a thread caught mid-write when userspace freezes can stall the suspend.
+  Precautionary - not established as a cause of the suspend hang.
+- **"Apply On Startup" toggle** (`apply_on_startup`, default on) in the Performance
+  section, which also surfaces when the crash guard has disabled itself.
+- **Crash sentinel.** A marker is written before touching hardware at boot and cleared on
+  completion. If it survives to the next start, the apply is skipped and disabled rather
+  than reboot-looping into the same fault.
+- Startup no longer restores Download mode, so a crash during it cannot leave the device
+  dark and power-limited on next boot.
 
 ### Changed
 
-- **Charge limit is now read-only**, displayed but not settable. SteamOS owns this
-  setting and exposes it in Settings > Power; the plugin writing it silently reverted
-  the user's choice. Verified: SteamOS's `get-max-charge-level` works on this device.
-- Removed the unused `gpu_clock` field from `PERFORMANCE_PROFILES` — no code ever read it.
+- **Fan mode is no longer applied at boot or on resume.** `throttle_thermal_policy` is
+  the same knob as SteamOS's Performance Profile, so writing it automatically silently
+  reverted a low-power/performance selection made in SteamOS settings. It is now only
+  written when the user explicitly picks a profile or fan mode here.
+- **Charge limit is now read-only**, displayed but not settable, and read from hardware
+  rather than from stored settings. SteamOS owns it and exposes it in Settings > Power;
+  applying our stored value at startup silently reverted it (80 -> 100).
+- Removed the unused `gpu_clock` field from `PERFORMANCE_PROFILES` - no code read it.
 
 ### Notes on scope
 
 Probing `steamos-manager` showed SteamOS has **no working TDP control** on this device
 (`UnknownInterface 'TdpLimit1'`), so power limits remain the plugin's job. SMT and CPU
-boost are also kept: the DBus methods exist but SteamOS does not expose them in its UI,
-and there is no SMT method at all. Controller remapping/deadzones/rumble are deliberately
-not implemented despite `hid_asus_ally` exposing them, because Steam Input already does.
+boost are kept: the DBus methods exist but SteamOS does not expose them in its UI, and
+there is no SMT method at all. Controller remapping/deadzones/rumble are deliberately not
+implemented despite `hid_asus_ally` exposing them, because Steam Input already does.
 See `docs/steamos-overlap.md`.
-
-- `apply_on_startup` setting (default on) to control whether settings are re-applied at boot.
-- Crash sentinel: if a previous startup apply did not complete, the next start skips it
-  and disables startup apply rather than reboot-looping into the same fault.
-- Startup no longer restores Download mode, so a crash during it cannot leave the device
-  dark and power-limited on next boot.
-- Charge limit is now read from hardware rather than assumed, so SteamOS's own charge
-  limit setting is respected instead of being overwritten at boot.
 
 ## [1.1.0] - 2026-01-03
 

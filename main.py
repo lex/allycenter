@@ -132,6 +132,23 @@ class Plugin:
             except OSError as e:
                 decky.logger.warning(f"Could not clear startup sentinel: {e}")
 
+    async def on_suspend(self) -> bool:
+        """Stop RGB animation threads before the system suspends.
+
+        The effect threads write to the LED node in a loop, and those writes go over
+        USB HID to the MCU. A thread caught mid-write when the kernel freezes userspace
+        can sit in uninterruptible sleep and stall the freeze. Stopping cleanly first
+        removes that hazard. This is precautionary - it is not established that it has
+        ever caused a hang. See docs/suspend-hang-investigation.md.
+        """
+        try:
+            self._stop_effect()
+            decky.logger.info("Suspending, stopped RGB effect threads")
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to stop effects before suspend: {e}")
+            return False
+
     async def on_resume(self) -> bool:
         """Re-apply hardware state after waking from suspend.
 
@@ -149,7 +166,7 @@ class Plugin:
                 else:
                     profile = self.settings.get("current_profile", "performance")
                     if profile != "download":
-                        await self.set_performance_profile(profile)
+                        await self.set_performance_profile(profile, apply_fan=False)
             return True
         except Exception as e:
             decky.logger.error(f"Failed to re-apply after resume: {e}")
@@ -192,14 +209,15 @@ class Plugin:
             profile = self.settings.get("saved_profile", "performance")
             self.settings["current_profile"] = profile
 
+        # Fan mode is deliberately NOT applied here. throttle_thermal_policy is the
+        # same knob as SteamOS's Performance Profile, so writing it at boot silently
+        # reverted a low-power/performance selection made in SteamOS settings.
         if self.settings.get("tdp_override") and not self.settings.get("use_external_tdp"):
             await step("tdp", self.set_tdp(self.settings.get("custom_tdp", 17)))
-            await step("fan_mode", self.set_fan_mode(self.settings.get("fan_mode", "auto")))
         elif not self.settings.get("use_external_tdp"):
-            await step("profile", self.set_performance_profile(profile))
+            await step("profile", self.set_performance_profile(profile, apply_fan=False))
         else:
             decky.logger.info("External TDP management enabled, skipping TDP restore")
-            await step("fan_mode", self.set_fan_mode(self.settings.get("fan_mode", "auto")))
 
         await step("rgb", self._apply_rgb())
 
@@ -737,24 +755,30 @@ class Plugin:
             "current": self.settings.get("current_profile", "performance")
         }
 
-    async def set_performance_profile(self, profile_id: str) -> bool:
+    async def set_performance_profile(self, profile_id: str, apply_fan: bool = True) -> bool:
         try:
             if profile_id not in PERFORMANCE_PROFILES:
                 decky.logger.error(f"Unknown profile: {profile_id}")
                 return False
-            
+
             profile = PERFORMANCE_PROFILES[profile_id]
             tdp = profile["tdp"]
             fan_curve = profile.get("fan_curve", "balanced")
-            
+
             await self.set_tdp(tdp)
-            await self.set_fan_mode(fan_curve)
-            
+            # throttle_thermal_policy is the same knob as SteamOS's Performance
+            # Profile (low-power/balanced/performance). Writing it unprompted - at
+            # boot or on resume - silently reverts the user's SteamOS selection, so
+            # it is only written when the user picks a profile here.
+            if apply_fan:
+                await self.set_fan_mode(fan_curve)
+
             self.settings["current_profile"] = profile_id
             self.settings["tdp_override"] = False
             await self.save_settings()
             
-            decky.logger.info(f"Applied profile: {profile['name']} ({tdp}W, fan={fan_curve})")
+            fan_note = f"fan={fan_curve}" if apply_fan else "fan unchanged (SteamOS owns it)"
+            decky.logger.info(f"Applied profile: {profile['name']} ({tdp}W, {fan_note})")
             return True
             
         except Exception as e:
@@ -992,9 +1016,12 @@ class Plugin:
             self.settings["fan_mode"] = mode
             await self.save_settings()
             
-            # ROG Ally thermal policy values: 0=balanced, 1=silent/quiet, 2=turbo/performance
-            # Note: Values 1 and 2 are swapped compared to other ASUS laptops
-            mode_map = {"quiet": "1", "balanced": "0", "performance": "2", "auto": "0"}
+            # Verified on RC73XA by writing each value and reading back the ACPI
+            # platform profile, in both directions:
+            #   0 -> balanced, 1 -> performance, 2 -> low-power
+            # The previous mapping had 1 and 2 the other way round, so "Quiet"
+            # actually selected Performance and vice versa.
+            mode_map = {"quiet": "2", "balanced": "0", "performance": "1", "auto": "0"}
             policy_value = mode_map.get(mode, "0")
             
             # Find and write to throttle_thermal_policy

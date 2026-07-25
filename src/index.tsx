@@ -115,6 +115,7 @@ const setCpuBoostEnabled = callable<[boolean], boolean>(
 );
 const getFanDiagnostics = callable<[], FanDiagnostics>("get_fan_diagnostics");
 const onResume = callable<[], boolean>("on_resume");
+const onSuspend = callable<[], boolean>("on_suspend");
 const getStartupApply = callable<[], StartupApplyInfo>("get_startup_apply");
 const setStartupApply = callable<[boolean], boolean>("set_startup_apply");
 const setUseExternalTdp = callable<[boolean], boolean>("set_use_external_tdp");
@@ -1311,16 +1312,23 @@ export default definePlugin(() => {
   // The MCU resets the joystick rings across a suspend/resume cycle, so settings
   // that were applied before sleep are gone on wake. Re-apply on resume.
   let resumeRegistration: { unregister: () => void } | undefined;
+  let suspendRegistration: { unregister: () => void } | undefined;
   try {
-    resumeRegistration = (
-      window as any
-    ).SteamClient?.System?.RegisterForOnResumeFromSuspend(() => {
+    const system = (window as any).SteamClient?.System;
+    resumeRegistration = system?.RegisterForOnResumeFromSuspend(() => {
       onResume().catch((e: unknown) =>
         console.error("Ally Center: resume re-apply failed", e)
       );
     });
+    // Stop RGB animation threads before the freeze - their writes go over USB HID
+    // to the MCU and a thread caught mid-write can stall the suspend.
+    suspendRegistration = system?.RegisterForOnSuspendRequest(() => {
+      onSuspend().catch((e: unknown) =>
+        console.error("Ally Center: suspend cleanup failed", e)
+      );
+    });
   } catch (e) {
-    console.error("Ally Center: could not register resume handler", e);
+    console.error("Ally Center: could not register suspend/resume handlers", e);
   }
 
   return {
@@ -1333,6 +1341,7 @@ export default definePlugin(() => {
       // Remove the global overlay component when plugin is unloaded
       routerHook.removeGlobalComponent("AllyCenterBlackOverlay");
       resumeRegistration?.unregister();
+      suspendRegistration?.unregister();
       // Ensure download mode is disabled when plugin unloads
       downloadModeState.setActive(false);
     },
