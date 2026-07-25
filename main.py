@@ -1458,7 +1458,12 @@ class Plugin:
             return False
 
     def _armoury_range(self, name: str, fallback: tuple) -> tuple:
-        """Read (min, max) from firmware rather than hardcoding per model."""
+        """Read (min, max) from the driver rather than hardcoding per model.
+
+        These come from a DMI-matched table in asus-armoury, and the driver keeps
+        separate AC and battery sets - so the range genuinely changes when the
+        charger is plugged in. Read it at write time; never cache it at startup.
+        """
         lo = self._read_armoury(name, "min_value")
         hi = self._read_armoury(name, "max_value")
         try:

@@ -39,8 +39,11 @@ These findings are verified **only** on RC73XA. Known or suspected differences e
   model-dependent and this fork's value is **wrong for the original Ally**.
   *Suggested fix:* write `/sys/firmware/acpi/platform_profile` by name instead, and read
   `platform_profile_choices` at runtime — no hardcoded numbers to get wrong.
-- **Power limit ranges.** 7/35, 13/45, 19/55 come from this machine's firmware. Other
-  models will differ; always read them from `asus_armoury` rather than hardcoding.
+- **Power limit ranges.** 7/35, 13/45, 19/55 are the **battery** values for this board,
+  and they come from a DMI-matched table inside the `asus-armoury` driver, not from
+  firmware. They differ **per model and per power source** — plugging in changes them.
+  Always read `min_value`/`max_value` at the moment of writing. Source of truth:
+  `drivers/platform/x86/asus-armoury.h` in the kernel tree.
 - **Charge limit location.** On this model it is on the battery
   (`power_supply/BAT0/`), not under `asus-nb-wmi`.
 - **`ryzenadj`** is not installed and `fan_curve_enable` does not exist here; both may be

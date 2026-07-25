@@ -23,7 +23,7 @@ Relevant loaded modules:
 |---|---|
 | `hid_asus_ally` (driver `asus_rog_ally`) | joystick-ring RGB, via `led_class_multicolor`, on USB HID `0B05:1B4C` |
 | `asus_wmi` / `asus_nb_wmi` | PPT power limits, thermal policy, fan hwmon, MCU powersave |
-| `asus_armoury` | firmware-attributes interface — **authoritative min/max/default** for power limits |
+| `asus_armoury` | firmware-attributes interface for power limits. Min/max/default come from a **DMI-matched table in the driver**, not from firmware |
 | `amd_pmf`, `platform_profile` | ACPI platform profile |
 
 ## asus_armoury — the firmware-attributes interface
@@ -87,16 +87,57 @@ front-ends onto the same firmware, with the armoury one canonical.
 
 Two views of the same firmware, which do **not** report the same current state:
 
-- Write path used by the plugin: `/sys/devices/platform/asus-nb-wmi/ppt_*` (mode 644)
-- Authoritative metadata: `/sys/class/firmware-attributes/asus-armoury/attributes/<attr>/{current_value,min_value,max_value,default_value}`
+- Write path used by the plugin: `<attr>/current_value` under the firmware-attributes class
+- Legacy path (deprecated): `/sys/devices/platform/asus-nb-wmi/ppt_*` (mode 644)
 
-| Attribute | WMI node | min | max | default | meaning |
+**The ranges are not read from firmware.** `asus-armoury.h` carries a DMI-matched table
+of hardcoded limits (`dmi_first_match(power_limits)` in `init_rog_tunables`). The values
+exposed in sysfs are that table, not something the firmware reports. This is why the
+legacy WMI path accepts out-of-range values — it has no table to check against.
+
+### Limits differ between AC and battery
+
+The driver keeps two sets (`ASUS_ROG_TUNABLE_AC` / `ASUS_ROG_TUNABLE_DC`) and selects
+based on whether the charger is connected, so **`min_value`/`max_value`/`default_value`
+change when you plug in.** From `asus-armoury.h` for `RC73XA`:
+
+| | AC | Battery (DC) |
+|---|---|---|
+| `ppt_pl1_spl` | 7–35, no default | 7–35, default 17 |
+| `ppt_pl2_sppt` | **14**–45, no default | **13**–45, default 21 |
+| `ppt_pl3_fppt` | 19–55, no default | 19–55, default 26 |
+
+Everything recorded in this document was captured **on battery**, so it is the DC set.
+Where a default is unset the driver substitutes another value rather than reporting 0.
+
+Consequence: ranges must be read at the moment of writing, not cached at startup. The
+plugin does this via `_armoury_range()`.
+
+### Limits are per model, too
+
+For comparison, from the same table — which is why hardcoding any of this is wrong:
+
+| Board | AC `pl1` max | DC `pl1` max |
+|---|---|---|
+| `RC71` (original Ally) | 30 | 25 |
+| `RC72` (Ally X) | 30 | — |
+| `RC73XA` (Xbox Ally X) | 35 | 35 |
+
+### Why `ppt_apu_sppt` and `ppt_platform_sppt` are missing
+
+Both are in the driver's attribute table, but `asus_fw_attr_add()` only creates a
+power tunable when `has_valid_limit()` passes — i.e. the DMI table defines a non-zero
+max. `RC73XA` defines none for these two, so the driver deliberately does not expose
+them. They still exist on the legacy path, where nothing validates them.
+
+| Attribute | Legacy WMI node | min | max | default | meaning |
 |---|---|---|---|---|---|
-| `ppt_pl1_spl` | `ppt_pl1_spl` | 7 | 35 | 17 | sustained |
-| `ppt_pl2_sppt` | `ppt_pl2_sppt` | 13 | 45 | 21 | slow boost |
-| `ppt_pl3_fppt` | `ppt_fppt` | 19 | 55 | 26 | fast boost |
+| `ppt_pl1_spl` | `ppt_pl1_spl` | 7 | 35 | 17 | sustained ("CPU slow package limit") |
+| `ppt_pl2_sppt` | `ppt_pl2_sppt` | 13 | 45 | 21 | slow boost ("CPU fast package limit") |
+| `ppt_pl3_fppt` | `ppt_fppt` | 19 | 55 | 26 | fast boost ("CPU fastest package limit") |
 
-Also present, no armoury metadata: `ppt_apu_sppt`, `ppt_platform_sppt`.
+(Values as read on battery — see below.) Note the name differs between interfaces:
+`ppt_pl3_fppt` via firmware-attributes, `ppt_fppt` on the legacy path.
 
 **Critical gotchas:**
 
@@ -108,7 +149,7 @@ Also present, no armoury metadata: `ppt_apu_sppt`, `ppt_platform_sppt`.
 3. At boot the WMI nodes read `5`, which is below every documented minimum. It is not
    established whether this reflects an applied 5W state or an unpushed driver default —
    see Open questions.
-4. **The two interfaces disagree about current state.** After the plugin wrote 25W via
+4. **The two interfaces disagree about current state.** (Confirmed by test.) After the plugin wrote 25W via
    WMI, `ppt_pl1_spl` read `25` while armoury's `current_value` still read `17`. Armoury
    appears to reflect only what was written *through armoury*. Treat armoury as
    authoritative for `min_value`/`max_value`/`default_value` metadata, and WMI as the
