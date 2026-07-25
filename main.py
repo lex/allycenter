@@ -48,9 +48,9 @@ STOCK_FAN_CURVES = {
     "cpu": [(48, 2), (54, 22), (59, 45), (62, 56), (62, 56), (62, 56), (62, 56), (62, 56)],
     "gpu": [(48, 2), (54, 22), (59, 33), (62, 33), (62, 33), (62, 33), (62, 33), (62, 33)],
 }
-# pwm{n}_enable on the curve device. The exact semantics are NOT verified on hardware;
-# 2 is what the device reports at rest, and 1 is the conventional "manual/custom" value
-# in the kernel's pwm_enable convention. See docs/feature-candidates.md.
+# pwm{n}_enable on the curve device. Verified on RC73XA: with an aggressive curve
+# written, enable=2 ignored it entirely (fan stayed at 0 RPM) while enable=1 applied it
+# immediately (fan ramped to 5300 RPM at 44 C). So 1 = custom curve, 2 = firmware.
 FAN_CURVE_ENABLE_CUSTOM = "1"
 FAN_CURVE_ENABLE_AUTO = "2"
 
@@ -1249,10 +1249,9 @@ class Plugin:
             return False
 
     # ---- Custom fan curves -------------------------------------------------
-    # UNVERIFIED ON HARDWARE. The curve points themselves are plain sysfs values,
-    # but the meaning of pwm{n}_enable is a guess (see the constants above). Verify
-    # on a device before relying on this, and note that a bad curve has thermal
-    # consequences - hence the clamping and the restore-defaults call below.
+    # Verified on RC73XA: writing points has no effect until pwm{n}_enable is set to
+    # 1, and setting it back to 2 returns control to the firmware. A bad curve still
+    # has thermal consequences, hence the clamping and the restore-defaults call.
 
     _FAN_KEYS = {"cpu": 1, "gpu": 2}
 
@@ -1471,7 +1470,15 @@ class Plugin:
 
     def _write_platform_attr(self, armoury_name: str, legacy_name: str, value) -> str:
         """Write via firmware-attributes if possible, else the deprecated WMI node.
-        Returns which path was used, or "" on failure."""
+        Returns which path was used, or "" on failure.
+
+        Verified: an armoury write takes effect immediately (a 7W limit set this way
+        held the CPU at 820 MHz under load) and does not raise pending_reboot, so
+        these are runtime settings rather than deferred firmware ones. Note the legacy
+        node's readback does NOT reflect an armoury write - the two are separate
+        readback caches over the same firmware, so never read the legacy node to
+        determine current state.
+        """
         if self._write_armoury(armoury_name, value):
             return "armoury"
 
@@ -1602,6 +1609,31 @@ class Plugin:
         except Exception as e:
             decky.logger.error(f"Failed to set TDP: {e}")
             return False
+
+    def _read_charge_limit(self) -> int:
+        """Read the charge limit from hardware. SteamOS owns this setting, so the
+        hardware is the source of truth, not anything we stored."""
+        path = self._find_charge_limit_path()
+        if path:
+            try:
+                with open(path, 'r') as f:
+                    return int(f.read().strip())
+            except Exception as e:
+                decky.logger.warning(f"Could not read charge limit: {e}")
+        return self.settings.get("charge_limit", 100)
+
+    def _find_charge_limit_path(self) -> str:
+        """Locate the charge threshold. It lives on the battery, not asus-nb-wmi."""
+        if os.path.exists(CHARGE_LIMIT_PATH):
+            return CHARGE_LIMIT_PATH
+        # Fall back to scanning power supplies in case BAT0 is named differently
+        ps_base = "/sys/class/power_supply"
+        if os.path.exists(ps_base):
+            for supply in sorted(os.listdir(ps_base)):
+                candidate = os.path.join(ps_base, supply, "charge_control_end_threshold")
+                if os.path.exists(candidate):
+                    return candidate
+        return ""
 
     async def get_charge_limit(self) -> dict:
         path = self._find_charge_limit_path()

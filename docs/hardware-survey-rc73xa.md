@@ -68,9 +68,20 @@ Migrating to `<attr>/current_value` under the firmware-attributes class is the
 forward-compatible path, and would also explain the discrepancy below: the two are two
 front-ends onto the same firmware, with the armoury one canonical.
 
-`pending_reboot` gives a way to answer the open question of whether armoury writes
-persist as firmware settings — write a limit through armoury and see whether the flag
-is raised.
+### Verified behaviour of armoury writes
+
+- **They take effect immediately.** A 7W `ppt_pl1_spl` written through armoury alone
+  held the CPU at 820 MHz / 6.1 W under an 8-thread load — indistinguishable from the
+  same limit written through both paths (870 MHz / 6.1 W).
+- **They are runtime, not deferred.** `pending_reboot` stayed `0` across writes, so
+  these are not firmware settings that survive a reboot. **TDP must still be re-applied
+  at boot.**
+- **The legacy node's readback does not reflect an armoury write.** After writing `7`
+  through armoury, `asus-nb-wmi/ppt_pl1_spl` still read `25`. The two are separate
+  readback caches over the same firmware. Never read the legacy node to determine
+  current state — read `<attr>/current_value`.
+- Switching the plugin to this interface removed the deprecation warning entirely
+  (verified: zero warnings in `dmesg` after a full startup apply).
 
 ## Power limits (PPT)
 
@@ -158,12 +169,24 @@ PWM values are 0–255, temps in °C.
 Note `fan_curve_enable` — which the current plugin references — **does not exist** on
 this model.
 
-**Caution for the custom fan curve feature:** at boot the kernel logs
-`asus_wmi: fan_curve_get_factory_default (0x00110032) failed: -19` (`-ENODEV`). The
-curve device still registers and reports plausible points, but the firmware's factory
-defaults could not be read. The "stock" curve recorded in this document may therefore be
-a driver fallback rather than genuine factory values — relevant to any
-restore-to-defaults implementation.
+**`pwm{n}_enable` semantics — verified on hardware:**
+
+| Value | Behaviour |
+|---|---|
+| `1` | Custom curve active |
+| `2` | Firmware/automatic control; written curve points are **ignored** |
+
+Proven by writing an aggressive curve (120 PWM at 30 °C rising to 255) and observing:
+at `enable=2` the fan stayed at **0 RPM** despite the curve; setting `enable=1` ramped it
+to **5300 RPM at 44 °C**. Writing points alone therefore does nothing — `enable` is the
+switch. Returning to `2` restores firmware control, though the fan takes a while to
+spin down from a high setting.
+
+**Caution:** at boot the kernel logs
+`asus_wmi: fan_curve_get_factory_default (0x00110032) failed: -19` (`-ENODEV`), so the
+firmware's factory defaults could not be read. The "stock" curve recorded above is what
+the driver reports at rest and restores control correctly, but it is not confirmed to be
+the genuine factory curve.
 
 ## Thermal policy
 

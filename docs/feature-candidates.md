@@ -1,9 +1,9 @@
 # Feature candidates — read-only survey
 
-> **Status:** all five recommended items below are now implemented (backend + UI).
-> Everything except the fan curves was built from read-only observations that are
-> well understood. **The fan curve implementation is unverified on hardware** — see the
-> warning under item 1. Nothing in this document has been retested since implementation.
+> **Status:** all five recommended items are implemented (backend + UI) and deployed.
+> The fan curve's `pwm_enable` semantics — the one open unknown — are now **verified on
+> hardware**: `1` = custom curve, `2` = firmware control, and points written while in
+> mode `2` are ignored entirely. See `hardware-survey-rc73xa.md` for the evidence.
 
 Probed 2026-07-25 on the ROG Xbox Ally X (RC73XA), **read-only**: every path below was
 inspected and its permissions recorded, but nothing here has been written to or tested.
@@ -34,10 +34,10 @@ Two independent curves, `pwm1` = CPU fan, `pwm2` = GPU fan. Stock values:
 Nothing else on the device offers this — SteamOS reports `Fan control state: BIOS` and
 exposes no curve editing. Genuinely additive.
 
-**Unknown:** the meaning of `pwm_enable` values (presumably `1` = use custom curve,
-`2` = automatic/BIOS, but this is a guess). Also unexplained: hwmon `asus` reports
-`pwm1_enable=2` / `pwm2_enable=0` while the curve device reports `2` for both.
-Resolve before implementing.
+**Resolved:** `pwm_enable` is `1` = custom curve, `2` = firmware control — verified by
+writing an aggressive curve, seeing it ignored at `2` (0 RPM) and applied at `1`
+(5300 RPM at 44 °C). Still unexplained: hwmon `asus` reports `pwm2_enable=0` while the
+curve device reports `2`.
 
 **Risk note:** fan curves are the one item on this list where a bad value has thermal
 consequences. Any implementation should clamp PWM, enforce monotonically increasing
@@ -132,8 +132,9 @@ not re-probed.
 **Conclusion: the safe, reversible surface is now essentially exhausted.** Everything
 remaining is blocked behind one of:
 
-- a write, to resolve semantics (`pwm_enable` on the fan curve; whether `asus_armoury`
-  writes persist across reboot),
+- ~~a write, to resolve semantics~~ — both resolved: `pwm_enable` is 1=custom/2=firmware,
+  and armoury writes are runtime only (`pending_reboot` never rises), so TDP still needs
+  re-applying at boot,
 - firmware (`Aura` LED persistence in MCU NVRAM; a BIOS newer than `RC73XA.316` for the
   `EC0.LID` ACPI defect), or
 - a deliberate decision to duplicate SteamOS or Steam Input.

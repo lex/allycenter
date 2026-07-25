@@ -57,7 +57,8 @@ See `docs/` for the hardware reference and the analysis behind these decisions.
 - **Custom fan curves.** Two independent 8-point curves (CPU and GPU fan) via
   `asus_custom_fan_curve`, with a restore-stock-curve button. Values are clamped and
   forced non-decreasing so a curve cannot demand less airflow at a higher temperature.
-  **Not yet verified on hardware** - the meaning of `pwm_enable` is still an assumption.
+  Verified on hardware: `pwm_enable` is `1` = custom curve, `2` = firmware control, and
+  curve points written while in firmware mode are ignored entirely.
 - **Monitoring section**: APU package power, CPU/GPU/SSD temperatures, GPU usage and
   clock, both fan RPMs, and charger wattage when on AC. Polls only while expanded.
 - **Power preference (EPP)** selector - `performance` through `power`, written to every
@@ -91,6 +92,17 @@ See `docs/` for the hardware reference and the analysis behind these decisions.
   rather than from stored settings. SteamOS owns it and exposes it in Settings > Power;
   applying our stored value at startup silently reverted it (80 -> 100).
 - Removed the unused `gpu_clock` field from `PERFORMANCE_PROFILES` - no code read it.
+
+### Verified on hardware
+
+- Power limits applied through firmware-attributes take effect immediately (a 7W limit
+  held the CPU at 820 MHz under load) and raise no deprecation warning.
+- `pending_reboot` never rises, so armoury writes are runtime settings, **not** firmware
+  settings that survive a reboot — TDP still has to be re-applied at boot.
+- The legacy WMI node's readback does not reflect an armoury write; the two are separate
+  readback caches over the same firmware. Only `<attr>/current_value` should be read.
+- Resume re-apply, the crash sentinel, the platform-profile-by-name write and the
+  SteamOS conflict fixes were each verified on the device.
 
 ### Notes on scope
 
