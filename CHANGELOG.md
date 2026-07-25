@@ -54,6 +54,21 @@ See `docs/` for the hardware reference and the analysis behind these decisions.
 - Startup no longer restores Download mode, so a crash during it cannot leave the device
   dark and power-limited on next boot.
 
+- **Custom fan curves.** Two independent 8-point curves (CPU and GPU fan) via
+  `asus_custom_fan_curve`, with a restore-stock-curve button. Values are clamped and
+  forced non-decreasing so a curve cannot demand less airflow at a higher temperature.
+  **Not yet verified on hardware** - the meaning of `pwm_enable` is still an assumption.
+- **Monitoring section**: APU package power, CPU/GPU/SSD temperatures, GPU usage and
+  clock, both fan RPMs, and charger wattage when on AC. Polls only while expanded.
+- **Power preference (EPP)** selector - `performance` through `power`, written to every
+  CPU policy rather than just cpu0. Not exposed in the SteamOS UI.
+- **Boot sound toggle** for the ASUS POST chime. Labelled in the UI as firmware-stored,
+  since unlike the other controls it persists on its own.
+- **Battery RGB mode now uses a kernel LED trigger** (`BAT0-charging-orange-full-green`)
+  instead of a thread polling battery capacity every 5 seconds. Falls back to the old
+  polling effect if the trigger is unavailable. This also removes one of the threads
+  identified as a potential suspend hazard.
+
 ### Changed
 
 - **Fan mode is no longer applied at boot or on resume.** `throttle_thermal_policy` is

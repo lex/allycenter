@@ -118,6 +118,13 @@ const onResume = callable<[], boolean>("on_resume");
 const onSuspend = callable<[], boolean>("on_suspend");
 const getStartupApply = callable<[], StartupApplyInfo>("get_startup_apply");
 const setStartupApply = callable<[boolean], boolean>("set_startup_apply");
+const getMonitoring = callable<[], Monitoring>("get_monitoring");
+const setEpp = callable<[string], boolean>("set_epp");
+const getBootSound = callable<[], BootSoundInfo>("get_boot_sound");
+const setBootSound = callable<[boolean], boolean>("set_boot_sound");
+const getFanCurve = callable<[], FanCurveInfo>("get_fan_curve");
+const setFanCurve = callable<[string, number[][]], boolean>("set_fan_curve");
+const resetFanCurve = callable<[string], boolean>("reset_fan_curve");
 const setUseExternalTdp = callable<[boolean], boolean>("set_use_external_tdp");
 
 interface DeviceInfo {
@@ -151,6 +158,7 @@ interface RgbState {
   effect: string;
   speed: number;
   available: boolean;
+  trigger: string;
 }
 
 interface PerformanceProfile {
@@ -181,6 +189,8 @@ interface ScreenState {
 interface FanInfo {
   mode: string;
   speed: number;
+  cpu_fan: number;
+  gpu_fan: number;
   available: boolean;
   policy_path?: string;
   current_policy?: number;
@@ -205,6 +215,33 @@ interface TdpSettings {
   available: boolean;
 }
 
+interface Monitoring {
+  cpu_temp: number;
+  gpu_temp: number;
+  nvme_temp: number;
+  apu_power: number;
+  gpu_busy: number;
+  gpu_clock: number;
+  cpu_fan: number;
+  gpu_fan: number;
+  charger_watts: number;
+  on_ac: boolean;
+}
+
+interface BootSoundInfo {
+  enabled: boolean;
+  available: boolean;
+}
+
+interface FanCurveInfo {
+  available: boolean;
+  cpu: number[][];
+  gpu: number[][];
+  cpu_custom: boolean;
+  gpu_custom: boolean;
+  stock: { cpu: number[][]; gpu: number[][] };
+}
+
 interface StartupApplyInfo {
   enabled: boolean;
   last_attempt_failed: boolean;
@@ -220,7 +257,19 @@ interface CpuSettings {
   smt_available: boolean;
   boost_enabled: boolean;
   boost_available: boolean;
+  epp: string;
+  epp_available: boolean;
+  epp_options: string[];
 }
+
+// amd-pstate EPP values are terse; give them names a player will understand.
+const EPP_LABELS: Record<string, string> = {
+  performance: "Performance",
+  balance_performance: "Balanced (performance)",
+  balance_power: "Balanced (power saving)",
+  power: "Maximum battery",
+  default: "Default",
+};
 
 const COLOR_PRESETS = [
   { name: "ROG Red", color: "#FF0000" },
@@ -1071,15 +1120,22 @@ const CpuSettingsSection: VFC = () => {
   const [cpuSettings, setCpuSettings] = useState<CpuSettings | null>(null);
   const [smtEnabled, setSmtState] = useState(true);
   const [boostEnabled, setBoostState] = useState(true);
+  const [epp, setEppState] = useState("");
+  const [bootSound, setBootSoundState] = useState<BootSoundInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const data = await getCpuSettings();
+        const [data, sound] = await Promise.all([
+          getCpuSettings(),
+          getBootSound(),
+        ]);
         setCpuSettings(data);
         setSmtState(data.smt_enabled);
         setBoostState(data.boost_enabled);
+        setEppState(data.epp);
+        setBootSoundState(sound);
       } catch (e) {
         console.error("Failed to get CPU settings:", e);
       }
@@ -1122,6 +1178,34 @@ const CpuSettingsSection: VFC = () => {
     }
   };
 
+  const handleEppChange = async (option: { data: string }) => {
+    const previous = epp;
+    setEppState(option.data);
+    const success = await setEpp(option.data);
+    if (success) {
+      toaster.toast({
+        title: "Ally Center",
+        body: `Power preference: ${EPP_LABELS[option.data] ?? option.data}`,
+      });
+    } else {
+      setEppState(previous);
+      toaster.toast({ title: "Ally Center", body: "Failed to set power preference" });
+    }
+  };
+
+  const handleBootSoundToggle = async (enabled: boolean) => {
+    setBootSoundState((s) => (s ? { ...s, enabled } : s));
+    const success = await setBootSound(enabled);
+    if (success) {
+      toaster.toast({
+        title: "Ally Center",
+        body: `Boot sound ${enabled ? "enabled" : "disabled"}`,
+      });
+    } else {
+      setBootSoundState((s) => (s ? { ...s, enabled: !enabled } : s));
+    }
+  };
+
   if (loading) {
     return (
       <PanelSection title="CPU Settings">
@@ -1152,6 +1236,32 @@ const CpuSettingsSection: VFC = () => {
             description="Disable to reduce heat and power usage"
             checked={boostEnabled}
             onChange={handleBoostToggle}
+          />
+        </PanelSectionRow>
+      )}
+
+      {cpuSettings?.epp_available && cpuSettings.epp_options.length > 0 && (
+        <PanelSectionRow>
+          <DropdownItem
+            label="Power Preference"
+            description="Balances performance against battery life, independently of TDP"
+            rgOptions={cpuSettings.epp_options.map((o) => ({
+              data: o,
+              label: EPP_LABELS[o] ?? o,
+            }))}
+            selectedOption={epp}
+            onChange={handleEppChange}
+          />
+        </PanelSectionRow>
+      )}
+
+      {bootSound?.available && (
+        <PanelSectionRow>
+          <ToggleField
+            label="Boot Sound"
+            description="ASUS POST chime. Stored in firmware, so it persists on its own"
+            checked={bootSound.enabled}
+            onChange={handleBootSoundToggle}
           />
         </PanelSectionRow>
       )}
@@ -1281,11 +1391,189 @@ const AboutSection: VFC = () => {
   );
 };
 
+
+const MonitoringSection: VFC = () => {
+  const [data, setData] = useState<Monitoring | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetch = async () => {
+      try {
+        const d = await getMonitoring();
+        if (!cancelled) setData(d);
+      } catch (e) {
+        console.error("Failed to get monitoring data:", e);
+      }
+    };
+    fetch();
+    // Only poll while the section is open - this panel is on screen during play.
+    if (!expanded) return;
+    const interval = setInterval(fetch, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [expanded]);
+
+  const row = (label: string, value: string) => (
+    <div style={infoRowStyle}>
+      <span style={labelStyle}>{label}</span>
+      <span style={valueStyle}>{value}</span>
+    </div>
+  );
+
+  return (
+    <PanelSection title="Monitoring">
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={() => setExpanded(!expanded)}>
+          {expanded ? "Hide Sensors \u25b2" : "Show Sensors \u25bc"}
+        </ButtonItem>
+      </PanelSectionRow>
+
+      {expanded && data && (
+        <div style={sectionStyle}>
+          {row("APU Power", `${data.apu_power.toFixed(1)} W`)}
+          {row("CPU Temp", `${data.cpu_temp.toFixed(0)}\u00b0C`)}
+          {row("GPU Temp", `${data.gpu_temp.toFixed(0)}\u00b0C`)}
+          {row("SSD Temp", `${data.nvme_temp.toFixed(0)}\u00b0C`)}
+          {row("GPU Usage", `${data.gpu_busy}%`)}
+          {row("GPU Clock", `${data.gpu_clock} MHz`)}
+          {row("CPU Fan", data.cpu_fan > 0 ? `${data.cpu_fan} RPM` : "idle")}
+          {row("GPU Fan", data.gpu_fan > 0 ? `${data.gpu_fan} RPM` : "idle")}
+          {data.on_ac &&
+            row(
+              "Charger",
+              data.charger_watts > 0 ? `${data.charger_watts.toFixed(1)} W` : "connected"
+            )}
+        </div>
+      )}
+    </PanelSection>
+  );
+};
+
+const FAN_CURVE_LABELS: Record<string, string> = { cpu: "CPU Fan", gpu: "GPU Fan" };
+
+const FanCurveSection: VFC = () => {
+  const [curves, setCurves] = useState<FanCurveInfo | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [selectedFan, setSelectedFan] = useState("cpu");
+  const [busy, setBusy] = useState(false);
+
+  const refresh = async () => {
+    try {
+      setCurves(await getFanCurve());
+    } catch (e) {
+      console.error("Failed to get fan curve:", e);
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  if (!curves?.available) return null;
+
+  const points: number[][] =
+    selectedFan === "cpu" ? curves.cpu : curves.gpu;
+  const isCustom =
+    selectedFan === "cpu" ? curves.cpu_custom : curves.gpu_custom;
+
+  // Adjust one point's PWM, keeping the curve non-decreasing so a later point
+  // can never demand less airflow than an earlier, cooler one.
+  const setPointPwm = async (index: number, pwm: number) => {
+    const next = points.map((p) => [p[0], p[1]]);
+    next[index][1] = pwm;
+    for (let i = index + 1; i < next.length; i++) {
+      next[i][1] = Math.max(next[i][1], pwm);
+    }
+    for (let i = index - 1; i >= 0; i--) {
+      next[i][1] = Math.min(next[i][1], pwm);
+    }
+    setBusy(true);
+    const ok = await setFanCurve(selectedFan, next);
+    setBusy(false);
+    if (ok) {
+      await refresh();
+    } else {
+      toaster.toast({ title: "Ally Center", body: "Failed to set fan curve" });
+    }
+  };
+
+  const handleReset = async () => {
+    setBusy(true);
+    const ok = await resetFanCurve(selectedFan);
+    setBusy(false);
+    if (ok) {
+      await refresh();
+      toaster.toast({
+        title: "Ally Center",
+        body: `${FAN_CURVE_LABELS[selectedFan]} restored to stock`,
+      });
+    }
+  };
+
+  return (
+    <PanelSection title="Fan Curve">
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={() => setExpanded(!expanded)}>
+          {expanded ? "Hide Fan Curve \u25b2" : "Edit Fan Curve \u25bc"}
+        </ButtonItem>
+      </PanelSectionRow>
+
+      {expanded && (
+        <div>
+          <PanelSectionRow>
+            <DropdownItem
+              label="Fan"
+              rgOptions={Object.keys(FAN_CURVE_LABELS).map((f) => ({
+                data: f,
+                label: FAN_CURVE_LABELS[f],
+              }))}
+              selectedOption={selectedFan}
+              onChange={(o: { data: string }) => setSelectedFan(o.data)}
+            />
+          </PanelSectionRow>
+
+          <div style={{ ...labelStyle, fontSize: "11px", padding: "0 16px 8px" }}>
+            {isCustom
+              ? "Using a custom curve."
+              : "Using the firmware curve. Adjusting a point switches to custom."}
+          </div>
+
+          {points.map((point, i) => (
+            <PanelSectionRow key={`${selectedFan}-${i}`}>
+              <SliderField
+                label={`${point[0]}\u00b0C \u2014 ${Math.round((point[1] / 255) * 100)}%`}
+                value={point[1]}
+                min={0}
+                max={255}
+                step={5}
+                showValue={false}
+                disabled={busy}
+                onChange={(v: number) => setPointPwm(i, v)}
+              />
+            </PanelSectionRow>
+          ))}
+
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={handleReset} disabled={busy}>
+              Restore Stock Curve
+            </ButtonItem>
+          </PanelSectionRow>
+        </div>
+      )}
+    </PanelSection>
+  );
+};
+
 const AllyCenterContent: VFC = () => {
   return (
     <div>
       <DownloadModeSection />
       <PerformanceSection />
+      <FanCurveSection />
+      <MonitoringSection />
       <CpuSettingsSection />
       <BatteryHealthSection />
       <RgbLightingSection />

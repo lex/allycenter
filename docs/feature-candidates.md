@@ -1,5 +1,10 @@
 # Feature candidates — read-only survey
 
+> **Status:** all five recommended items below are now implemented (backend + UI).
+> Everything except the fan curves was built from read-only observations that are
+> well understood. **The fan curve implementation is unverified on hardware** — see the
+> warning under item 1. Nothing in this document has been retested since implementation.
+
 Probed 2026-07-25 on the ROG Xbox Ally X (RC73XA), **read-only**: every path below was
 inspected and its permissions recorded, but nothing here has been written to or tested.
 Treat "writable" as "the mode bits allow it", not as "verified working".

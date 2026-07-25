@@ -35,6 +35,24 @@ ARMOURY_PATH = "/sys/class/firmware-attributes/asus-armoury/attributes"
 # Performance Profile, but addressed by name, which is model-independent.
 PLATFORM_PROFILE_PATH = "/sys/firmware/acpi/platform_profile"
 PLATFORM_PROFILE_CHOICES_PATH = "/sys/firmware/acpi/platform_profile_choices"
+CPUFREQ_BASE = "/sys/devices/system/cpu"
+# Kernel LED trigger used for the battery RGB mode, replacing a polling thread.
+# Confirmed present in the trigger list on RC73XA.
+BATTERY_LED_TRIGGER = "BAT0-charging-orange-full-green"
+
+# Custom fan curves. Two independent 8-point curves, pwm1 = CPU fan, pwm2 = GPU fan.
+FAN_CURVE_HWMON_NAME = "asus_custom_fan_curve"
+FAN_CURVE_POINTS = 8
+# Stock curves read from the device, used for "restore defaults". (temp C, pwm 0-255)
+STOCK_FAN_CURVES = {
+    "cpu": [(48, 2), (54, 22), (59, 45), (62, 56), (62, 56), (62, 56), (62, 56), (62, 56)],
+    "gpu": [(48, 2), (54, 22), (59, 33), (62, 33), (62, 33), (62, 33), (62, 33), (62, 33)],
+}
+# pwm{n}_enable on the curve device. The exact semantics are NOT verified on hardware;
+# 2 is what the device reports at rest, and 1 is the conventional "manual/custom" value
+# in the kernel's pwm_enable convention. See docs/feature-candidates.md.
+FAN_CURVE_ENABLE_CUSTOM = "1"
+FAN_CURVE_ENABLE_AUTO = "2"
 
 # Firmware limits for ppt_pl1_spl. The WMI nodes accept out-of-range values
 # without complaint and let the firmware clamp them, so we clamp here instead.
@@ -287,6 +305,14 @@ class Plugin:
             await step("smt", self.set_smt_enabled(self.settings["smt_enabled"]))
         if "cpu_boost_enabled" in self.settings:
             await step("cpu_boost", self.set_cpu_boost_enabled(self.settings["cpu_boost_enabled"]))
+        if self.settings.get("epp"):
+            await step("epp", self.set_epp(self.settings["epp"]))
+
+        # Fan curves are runtime state and are lost on reboot. Boot sound is a
+        # firmware attribute and persists on its own, so it is not re-applied.
+        for fan, points in (self.settings.get("fan_curves") or {}).items():
+            if points:
+                await step(f"fan_curve_{fan}", self.set_fan_curve(fan, points))
 
         await self.save_settings()
         decky.logger.info(f"Applied settings at startup: {results}")
@@ -474,7 +500,8 @@ class Plugin:
             "brightness": self.settings.get("rgb_brightness", 100),
             "effect": self.settings.get("rgb_effect", "static"),
             "speed": self.settings.get("rgb_speed", 50),
-            "available": os.path.exists(ALLY_LED_PATH)
+            "available": os.path.exists(ALLY_LED_PATH),
+            "trigger": self._current_led_trigger()
         }
 
     async def set_rgb_color(self, color: str) -> bool:
@@ -692,8 +719,40 @@ class Plugin:
             on = not on
             time.sleep(delay)
 
+    def _set_led_trigger(self, trigger: str) -> bool:
+        """Point the LED at a kernel trigger, or "none" to drive it ourselves.
+
+        The kernel can drive battery state directly, which is what the old battery
+        effect emulated with a polling thread.
+        """
+        try:
+            path = os.path.join(ALLY_LED_PATH, "trigger")
+            if not os.path.exists(path):
+                return False
+            with open(path, 'w') as f:
+                f.write(trigger)
+            return True
+        except Exception as e:
+            decky.logger.warning(f"Could not set LED trigger '{trigger}': {e}")
+            return False
+
+    def _current_led_trigger(self) -> str:
+        """The trigger file lists all options with the active one in [brackets]."""
+        try:
+            with open(os.path.join(ALLY_LED_PATH, "trigger"), 'r') as f:
+                for token in f.read().split():
+                    if token.startswith('[') and token.endswith(']'):
+                        return token[1:-1]
+        except Exception:
+            pass
+        return "none"
+
     def _effect_battery(self):
-        """RGB color based on battery level - green (full) to red (empty)"""
+        """RGB color based on battery level - green (full) to red (empty).
+
+        Retained as a fallback for devices whose LED lacks the BAT0 kernel triggers;
+        _apply_rgb prefers the trigger, which needs no thread.
+        """
         base_brightness = int(self.settings.get("rgb_brightness", 100) * 255 / 100)
         
         while self.effect_running:
@@ -757,6 +816,7 @@ class Plugin:
             if not self.settings.get("rgb_enabled", True):
                 # Turn off RGB
                 self._stop_effect()
+                self._set_led_trigger("none")
                 if os.path.exists(brightness_path):
                     with open(brightness_path, 'w') as f:
                         f.write("0")
@@ -767,10 +827,28 @@ class Plugin:
 
             if effect == "off":
                 self._stop_effect()
+                self._set_led_trigger("none")
                 if os.path.exists(brightness_path):
                     with open(brightness_path, 'w') as f:
                         f.write("0")
                 return True
+
+            # Battery state can be driven by the kernel directly, with no polling
+            # thread. Falls through to the Python effect if the trigger is missing.
+            if effect == "battery":
+                self._stop_effect()
+                if self._set_led_trigger(BATTERY_LED_TRIGGER):
+                    brightness = self.settings.get("rgb_brightness", 100)
+                    if os.path.exists(brightness_path):
+                        with open(brightness_path, 'w') as f:
+                            f.write(str(int(brightness * 255 / 100)))
+                    decky.logger.info(f"RGB battery mode via kernel trigger "
+                                      f"'{BATTERY_LED_TRIGGER}'")
+                    return True
+                decky.logger.info("Battery LED trigger unavailable, using polling effect")
+
+            # Any self-driven mode needs the kernel to stop owning the LED
+            self._set_led_trigger("none")
 
             if effect == "static":
                 # Static color - no animation
@@ -1173,6 +1251,138 @@ class Plugin:
             decky.logger.error(f"Failed to set fan mode: {e}")
             return False
 
+    # ---- Custom fan curves -------------------------------------------------
+    # UNVERIFIED ON HARDWARE. The curve points themselves are plain sysfs values,
+    # but the meaning of pwm{n}_enable is a guess (see the constants above). Verify
+    # on a device before relying on this, and note that a bad curve has thermal
+    # consequences - hence the clamping and the restore-defaults call below.
+
+    _FAN_KEYS = {"cpu": 1, "gpu": 2}
+
+    async def get_fan_curve(self) -> dict:
+        result = {"available": False, "cpu": [], "gpu": [], "cpu_custom": False,
+                  "gpu_custom": False, "stock": {k: [list(p) for p in v]
+                                                 for k, v in STOCK_FAN_CURVES.items()}}
+        try:
+            hwmon = self._find_hwmon_by_name(FAN_CURVE_HWMON_NAME)
+            if not hwmon:
+                return result
+            result["available"] = True
+
+            for name, idx in self._FAN_KEYS.items():
+                points = []
+                for point in range(1, FAN_CURVE_POINTS + 1):
+                    temp_path = os.path.join(hwmon, f"pwm{idx}_auto_point{point}_temp")
+                    pwm_path = os.path.join(hwmon, f"pwm{idx}_auto_point{point}_pwm")
+                    if not (os.path.exists(temp_path) and os.path.exists(pwm_path)):
+                        break
+                    try:
+                        with open(temp_path, 'r') as f:
+                            temp = int(f.read().strip())
+                        with open(pwm_path, 'r') as f:
+                            pwm = int(f.read().strip())
+                        points.append([temp, pwm])
+                    except Exception:
+                        break
+                result[name] = points
+
+                enable_path = os.path.join(hwmon, f"pwm{idx}_enable")
+                if os.path.exists(enable_path):
+                    try:
+                        with open(enable_path, 'r') as f:
+                            result[f"{name}_custom"] = f.read().strip() == FAN_CURVE_ENABLE_CUSTOM
+                    except Exception:
+                        pass
+        except Exception as e:
+            decky.logger.error(f"Failed to read fan curve: {e}")
+        return result
+
+    def _sanitise_curve(self, points: list) -> list:
+        """Clamp PWM to 0-255 and temps to 20-100C, and force both to be
+        non-decreasing. A curve that dips could park the fan low at high temp."""
+        clean = []
+        last_temp, last_pwm = 0, 0
+        for entry in points[:FAN_CURVE_POINTS]:
+            try:
+                temp, pwm = int(entry[0]), int(entry[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            temp = max(20, min(100, temp))
+            pwm = max(0, min(255, pwm))
+            temp = max(temp, last_temp)
+            pwm = max(pwm, last_pwm)
+            clean.append((temp, pwm))
+            last_temp, last_pwm = temp, pwm
+        return clean
+
+    async def set_fan_curve(self, fan: str, points: list) -> bool:
+        """Write an 8-point curve. `fan` is "cpu" or "gpu"."""
+        try:
+            idx = self._FAN_KEYS.get(fan)
+            if idx is None:
+                decky.logger.error(f"Unknown fan '{fan}'")
+                return False
+
+            hwmon = self._find_hwmon_by_name(FAN_CURVE_HWMON_NAME)
+            if not hwmon:
+                decky.logger.warning("Custom fan curve not available")
+                return False
+
+            clean = self._sanitise_curve(points)
+            if len(clean) < FAN_CURVE_POINTS:
+                # Pad by repeating the last point, which is how the stock curves end
+                if not clean:
+                    decky.logger.error("Refusing to write an empty fan curve")
+                    return False
+                clean += [clean[-1]] * (FAN_CURVE_POINTS - len(clean))
+
+            for point, (temp, pwm) in enumerate(clean, start=1):
+                with open(os.path.join(hwmon, f"pwm{idx}_auto_point{point}_temp"), 'w') as f:
+                    f.write(str(temp))
+                with open(os.path.join(hwmon, f"pwm{idx}_auto_point{point}_pwm"), 'w') as f:
+                    f.write(str(pwm))
+
+            enable_path = os.path.join(hwmon, f"pwm{idx}_enable")
+            if os.path.exists(enable_path):
+                with open(enable_path, 'w') as f:
+                    f.write(FAN_CURVE_ENABLE_CUSTOM)
+
+            self.settings.setdefault("fan_curves", {})[fan] = [list(p) for p in clean]
+            await self.save_settings()
+            decky.logger.info(f"Set {fan} fan curve: {clean}")
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to set {fan} fan curve: {e}")
+            return False
+
+    async def reset_fan_curve(self, fan: str = "") -> bool:
+        """Restore the stock curve(s) and hand control back to the firmware."""
+        try:
+            hwmon = self._find_hwmon_by_name(FAN_CURVE_HWMON_NAME)
+            if not hwmon:
+                return False
+
+            targets = [fan] if fan in self._FAN_KEYS else list(self._FAN_KEYS)
+            for name in targets:
+                idx = self._FAN_KEYS[name]
+                for point, (temp, pwm) in enumerate(STOCK_FAN_CURVES[name], start=1):
+                    with open(os.path.join(hwmon, f"pwm{idx}_auto_point{point}_temp"), 'w') as f:
+                        f.write(str(temp))
+                    with open(os.path.join(hwmon, f"pwm{idx}_auto_point{point}_pwm"), 'w') as f:
+                        f.write(str(pwm))
+                enable_path = os.path.join(hwmon, f"pwm{idx}_enable")
+                if os.path.exists(enable_path):
+                    with open(enable_path, 'w') as f:
+                        f.write(FAN_CURVE_ENABLE_AUTO)
+                self.settings.get("fan_curves", {}).pop(name, None)
+
+            await self.save_settings()
+            decky.logger.info(f"Restored stock fan curve(s): {targets}")
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to reset fan curve: {e}")
+            return False
+
     async def get_fan_diagnostics(self) -> dict:
         """Get diagnostic info about fan control paths for debugging"""
         result = {
@@ -1382,31 +1592,201 @@ class Plugin:
             return False
 
     async def get_cpu_settings(self) -> dict:
-        """Get current SMT and CPU boost settings"""
+        """Get current SMT, CPU boost and energy performance preference"""
         smt_path = "/sys/devices/system/cpu/smt/control"
         boost_path = "/sys/devices/system/cpu/cpufreq/boost"
-        
+        epp_path = os.path.join(CPUFREQ_BASE, "cpu0/cpufreq/energy_performance_preference")
+        epp_avail_path = os.path.join(
+            CPUFREQ_BASE, "cpu0/cpufreq/energy_performance_available_preferences"
+        )
+
         result = {
             "smt_enabled": True,
             "smt_available": os.path.exists(smt_path),
             "boost_enabled": True,
-            "boost_available": os.path.exists(boost_path)
+            "boost_available": os.path.exists(boost_path),
+            "epp": "",
+            "epp_available": os.path.exists(epp_path),
+            "epp_options": []
         }
-        
+
         try:
             if os.path.exists(smt_path):
                 with open(smt_path, 'r') as f:
                     smt_state = f.read().strip()
                 result["smt_enabled"] = smt_state == "on"
-            
+
             if os.path.exists(boost_path):
                 with open(boost_path, 'r') as f:
                     boost_state = f.read().strip()
                 result["boost_enabled"] = boost_state == "1"
+
+            if os.path.exists(epp_path):
+                with open(epp_path, 'r') as f:
+                    result["epp"] = f.read().strip()
+            if os.path.exists(epp_avail_path):
+                with open(epp_avail_path, 'r') as f:
+                    result["epp_options"] = f.read().split()
         except Exception as e:
             decky.logger.error(f"Failed to read CPU settings: {e}")
-        
+
         return result
+
+    async def set_epp(self, preference: str) -> bool:
+        """Set the energy performance preference on every CPU.
+
+        amd-pstate-epp exposes this per-policy, so writing only cpu0 would leave the
+        other cores on the old preference.
+        """
+        try:
+            options = (await self.get_cpu_settings()).get("epp_options", [])
+            if options and preference not in options:
+                decky.logger.error(f"Unsupported EPP '{preference}', options: {options}")
+                return False
+
+            written = 0
+            for cpu in sorted(os.listdir(CPUFREQ_BASE)):
+                if not cpu.startswith("cpu") or not cpu[3:].isdigit():
+                    continue
+                path = os.path.join(CPUFREQ_BASE, cpu, "cpufreq", "energy_performance_preference")
+                if not os.path.exists(path):
+                    continue
+                try:
+                    with open(path, 'w') as f:
+                        f.write(preference)
+                    written += 1
+                except Exception as e:
+                    decky.logger.warning(f"Could not set EPP on {cpu}: {e}")
+
+            if written:
+                self.settings["epp"] = preference
+                await self.save_settings()
+                decky.logger.info(f"Set EPP to {preference} on {written} CPUs")
+                return True
+
+            decky.logger.warning("EPP control not available")
+            return False
+        except Exception as e:
+            decky.logger.error(f"Failed to set EPP: {e}")
+            return False
+
+    async def get_boot_sound(self) -> dict:
+        path = os.path.join(ASUS_WMI_PATH, "boot_sound")
+        result = {"enabled": True, "available": os.path.exists(path)}
+        try:
+            if result["available"]:
+                with open(path, 'r') as f:
+                    result["enabled"] = f.read().strip() == "1"
+        except Exception as e:
+            decky.logger.error(f"Failed to read boot sound: {e}")
+        return result
+
+    async def set_boot_sound(self, enabled: bool) -> bool:
+        """Toggle the POST beep. Note this is a firmware attribute, so unlike the
+        other controls here it persists across reboots by design."""
+        try:
+            path = os.path.join(ASUS_WMI_PATH, "boot_sound")
+            if not os.path.exists(path):
+                decky.logger.warning("Boot sound control not available")
+                return False
+
+            with open(path, 'w') as f:
+                f.write("1" if enabled else "0")
+
+            self.settings["boot_sound"] = enabled
+            await self.save_settings()
+            decky.logger.info(f"Boot sound {'enabled' if enabled else 'disabled'}")
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to set boot sound: {e}")
+            return False
+
+    async def get_monitoring(self) -> dict:
+        """Live sensor readout for the panel."""
+        result = {
+            "cpu_temp": 0.0, "gpu_temp": 0.0, "nvme_temp": 0.0,
+            "apu_power": 0.0, "gpu_busy": 0, "gpu_clock": 0,
+            "cpu_fan": 0, "gpu_fan": 0,
+            "charger_watts": 0.0, "on_ac": False,
+        }
+
+        def read_int(path):
+            try:
+                with open(path, 'r') as f:
+                    return int(f.read().strip())
+            except Exception:
+                return None
+
+        try:
+            amdgpu = self._find_hwmon_by_name("amdgpu")
+            if amdgpu:
+                v = read_int(os.path.join(amdgpu, "temp1_input"))
+                if v is not None:
+                    result["gpu_temp"] = round(v / 1000, 1)
+                v = read_int(os.path.join(amdgpu, "power1_input"))
+                if v is not None:
+                    result["apu_power"] = round(v / 1000000, 1)
+                v = read_int(os.path.join(amdgpu, "freq1_input"))
+                if v is not None:
+                    result["gpu_clock"] = int(v / 1000000)
+
+            k10 = self._find_hwmon_by_name("k10temp")
+            if k10:
+                v = read_int(os.path.join(k10, "temp1_input"))
+                if v is not None:
+                    result["cpu_temp"] = round(v / 1000, 1)
+
+            nvme = self._find_hwmon_by_name("nvme")
+            if nvme:
+                v = read_int(os.path.join(nvme, "temp1_input"))
+                if v is not None:
+                    result["nvme_temp"] = round(v / 1000, 1)
+
+            asus = self._find_hwmon_by_name("asus")
+            if asus:
+                for key, node in (("cpu_fan", "fan1_input"), ("gpu_fan", "fan2_input")):
+                    v = read_int(os.path.join(asus, node))
+                    if v is not None:
+                        result[key] = v
+
+            gpu_dev = self._find_amdgpu_device()
+            if gpu_dev:
+                v = read_int(os.path.join(gpu_dev, "gpu_busy_percent"))
+                if v is not None:
+                    result["gpu_busy"] = v
+
+            ac_online = read_int("/sys/class/power_supply/AC0/online")
+            result["on_ac"] = bool(ac_online)
+
+            # Charger wattage from whichever USB-C PD source is live
+            ps_base = "/sys/class/power_supply"
+            if os.path.exists(ps_base):
+                for supply in os.listdir(ps_base):
+                    if not supply.startswith("ucsi-source-psy"):
+                        continue
+                    base = os.path.join(ps_base, supply)
+                    if read_int(os.path.join(base, "online")) != 1:
+                        continue
+                    uv = read_int(os.path.join(base, "voltage_now")) or 0
+                    ua = read_int(os.path.join(base, "current_now")) or 0
+                    if uv and ua:
+                        result["charger_watts"] = round((uv / 1000000) * (ua / 1000000), 1)
+                        break
+        except Exception as e:
+            decky.logger.error(f"Failed to read monitoring data: {e}")
+
+        return result
+
+    def _find_amdgpu_device(self) -> str:
+        """Resolve the amdgpu PCI device directory (not a connector directory)."""
+        base = "/sys/bus/pci/drivers/amdgpu"
+        if not os.path.exists(base):
+            return ""
+        for entry in sorted(os.listdir(base)):
+            path = os.path.join(base, entry)
+            if os.path.isdir(path) and os.path.exists(os.path.join(path, "gpu_busy_percent")):
+                return path
+        return ""
 
     async def set_smt_enabled(self, enabled: bool) -> bool:
         """Enable or disable Simultaneous Multi-Threading (SMT)"""
