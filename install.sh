@@ -1,11 +1,18 @@
 #!/bin/bash
 # Ally Center - Installation Script
-# Author: Keith Baker (Pixel Addict Games)
+#
+# Fork maintained at https://github.com/lex/allycenter
+# Based on the original by Keith Baker (Pixel Addict Games), MIT licensed.
+#
+# NO WARRANTY. This plugin writes to kernel interfaces controlling power limits,
+# thermal policy, fan behaviour, charging and backlight. You install and run it
+# entirely at your own risk; nobody is liable for any damage to your hardware.
+# Not affiliated with or endorsed by ASUS, Valve or Microsoft.
 set -e
 
 PLUGIN_NAME="Ally Center"
 PLUGIN_DIR="$HOME/homebrew/plugins/$PLUGIN_NAME"
-REPO_OWNER="PixelAddictUnlocked"
+REPO_OWNER="lex"
 REPO_NAME="allycenter"
 
 # Trap to ensure cleanup on exit
@@ -22,8 +29,13 @@ trap cleanup EXIT
 
 echo "================================"
 echo "  Ally Center Installer"
-echo "  by Pixel Addict Games"
+echo "  fork: github.com/lex/allycenter"
 echo "================================"
+echo ""
+echo "WARNING: This plugin controls power limits, thermal policy, fan"
+echo "behaviour, charging and backlight on your device. It comes with NO"
+echo "WARRANTY and nobody is liable for damage to your hardware."
+echo "Use entirely at your own risk. Not affiliated with ASUS/Valve/Microsoft."
 echo ""
 
 # Check if running on SteamOS/Linux

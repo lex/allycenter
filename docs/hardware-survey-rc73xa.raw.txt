@@ -1,0 +1,165 @@
+### date: 2026-07-25T20:29:40+03:00
+### uname: 6.16.12-drmexec7-valve24.5-1-neptune-616-drm-exec-gf253f5da553e
+### product: ROG Xbox Ally X RC73XA_RC73XA / bios RC73XA.316
+### cpu:  AMD Ryzen AI Z2 Extreme
+
+## /sys/class/leds
+ally:rgb:joystick_rings
+input18::capslock
+input18::compose
+input18::kana
+input18::numlock
+input18::scrolllock
+input1::capslock
+input1::numlock
+input1::scrolllock
+## ally rgb led node
+brightness [644] = 0
+max_brightness [444] = 255
+multi_index [444] = rgb rgb rgb rgb
+multi_intensity [644] = 16711680 16711680 16711680 16711680
+trigger [644] = [none] usb-gadget usb-host rc-feedback kbd-scrolllock kbd-numlock kbd-capslock kbd-kanalock kbd-shiftlock kbd-altgrlock kbd-ctrllock kbd-altlock kbd-shiftllock kbd-shiftrlock kbd-ctrlllock kbd-ctrlrlock disk-activity disk-read disk-write mtd nand-disk cpu cpu0 cpu1 cpu2 cpu3 cpu4 cpu5 cpu6 cpu7 panic AC0-online BAT0-charging-or-full BAT0-charging BAT0-full BAT0-charging-blink-full-solid BAT0-charging-orange-full-green mmc0 rfkill-any rfkill-none bluetooth-power hci0-power rfkill0 ucsi-source-psy-USBC000:001-online ucsi-source-psy-USBC000:002-online rfkill1 rfkill2 phy0rx phy0tx phy0assoc phy0radio rfkill3
+uevent [644] = 
+
+## asus-nb-wmi attributes
+boot_sound [644] = 1
+charge_mode [444] = 0
+cpufv [200] = cat: /sys/devices/platform/asus-nb-wmi/cpufv: Permission denied
+driver_override [644] = (null)
+mcu_powersave [644] = 1
+modalias [444] = platform:asus-nb-wmi
+nv_temp_target [644] = 75
+ppt_apu_sppt [644] = 5
+ppt_fppt [644] = 5
+ppt_pl1_spl [644] = 5
+ppt_pl2_sppt [644] = 5
+ppt_platform_sppt [644] = 5
+throttle_thermal_policy [644] = 2
+uevent [644] = DRIVER=asus-nb-wmi
+
+## acpi platform_profile
+current = custom
+choices = low-power balanced performance
+
+## hwmon map
+/sys/class/hwmon/hwmon0 = AC0
+/sys/class/hwmon/hwmon1 = acpi_fan
+/sys/class/hwmon/hwmon10 = amdgpu
+/sys/class/hwmon/hwmon11 = mt7921_phy0
+/sys/class/hwmon/hwmon2 = acpitz
+/sys/class/hwmon/hwmon3 = BAT0
+/sys/class/hwmon/hwmon4 = nvme
+/sys/class/hwmon/hwmon5 = k10temp
+/sys/class/hwmon/hwmon6 = ucsi_source_psy_USBC000:001
+/sys/class/hwmon/hwmon7 = ucsi_source_psy_USBC000:002
+/sys/class/hwmon/hwmon8 = asus
+/sys/class/hwmon/hwmon9 = asus_custom_fan_curve
+
+## asus hwmon (fans)
+fan1_input [444] = 0
+fan1_label [444] = cpu_fan
+fan2_input [444] = 0
+fan2_label [444] = gpu_fan
+name [444] = asus
+pwm1_enable [644] = 2
+pwm2_enable [644] = 0
+uevent [644] = 
+
+## asus_custom_fan_curve
+name [444] = asus_custom_fan_curve
+pwm1_auto_point1_pwm [644] = 2
+pwm1_auto_point1_temp [644] = 48
+pwm1_auto_point2_pwm [644] = 22
+pwm1_auto_point2_temp [644] = 54
+pwm1_auto_point3_pwm [644] = 45
+pwm1_auto_point3_temp [644] = 59
+pwm1_auto_point4_pwm [644] = 56
+pwm1_auto_point4_temp [644] = 62
+pwm1_auto_point5_pwm [644] = 56
+pwm1_auto_point5_temp [644] = 62
+pwm1_auto_point6_pwm [644] = 56
+pwm1_auto_point6_temp [644] = 62
+pwm1_auto_point7_pwm [644] = 56
+pwm1_auto_point7_temp [644] = 62
+pwm1_auto_point8_pwm [644] = 56
+pwm1_auto_point8_temp [644] = 62
+pwm1_enable [644] = 2
+pwm2_auto_point1_pwm [644] = 2
+pwm2_auto_point1_temp [644] = 48
+pwm2_auto_point2_pwm [644] = 22
+pwm2_auto_point2_temp [644] = 54
+pwm2_auto_point3_pwm [644] = 33
+pwm2_auto_point3_temp [644] = 59
+pwm2_auto_point4_pwm [644] = 33
+pwm2_auto_point4_temp [644] = 62
+pwm2_auto_point5_pwm [644] = 33
+pwm2_auto_point5_temp [644] = 62
+pwm2_auto_point6_pwm [644] = 33
+pwm2_auto_point6_temp [644] = 62
+pwm2_auto_point7_pwm [644] = 33
+pwm2_auto_point7_temp [644] = 62
+pwm2_auto_point8_pwm [644] = 33
+pwm2_auto_point8_temp [644] = 62
+pwm2_enable [644] = 2
+uevent [644] = 
+
+## BAT0
+alarm [644] = 8000000
+capacity [444] = 58
+capacity_level [444] = Normal
+charge_control_end_threshold [644] = 80
+cycle_count [444] = 0
+energy_full [444] = 78525000
+energy_full_design [444] = 80003000
+energy_now [444] = 45271000
+manufacturer [444] = ASUSTeK
+model_name [444] = ASUS Battery
+power_now [444] = 6040000
+present [444] = 1
+serial_number [444] =  
+status [444] = Discharging
+technology [444] = Li-ion
+type [444] = Battery
+uevent [644] = DEVTYPE=power_supply
+voltage_min_design [444] = 16065000
+voltage_now [444] = 15806000
+
+## backlight amdgpu_bl0
+actual_brightness [444] = 3352
+bl_power [644] = 0
+brightness [664] = 3352
+max_brightness [444] = 62451
+scale [444] = unknown
+type [444] = raw
+uevent [644] = 
+
+## cpu smt/boost
+smt/control = on
+cpufreq/boost = 1
+scaling_driver = amd-pstate-epp
+energy_perf_pref = balance_performance
+avail_governors = performance powersave
+
+## hid devices
+0003:0B05:1B4C.0001 = HID_NAME=ASUSTeK Computer Inc. N-KEY Device
+0003:0B05:1B4C.0002 = HID_NAME=ASUSTeK Computer Inc. N-KEY Device
+0003:0B05:1B4C.0003 = HID_NAME=ASUSTeK Computer Inc. N-KEY Device
+0003:0B05:1B4C.0004 = HID_NAME=ASUSTeK Computer Inc. N-KEY Device
+0003:0B05:1B4C.0005 = HID_NAME=ASUSTeK Computer Inc. N-KEY Device
+0003:0B05:1B4C.0006 = HID_NAME=ASUSTeK Computer Inc. N-KEY Device
+0003:28DE:12FD.0008 = HID_NAME=ROG Xbox Ally Controller
+0018:0603:F200.0007 = HID_NAME=NVTK0603:00 0603:F200
+
+## ryzenadj present?
+ls: cannot access '/usr/bin/ryzenadj': No such file or directory
+
+## plugin settings.json
+{
+  "current_profile": "performance",
+  "rgb_enabled": false,
+  "rgb_color": "#FF0000",
+  "rgb_brightness": 100,
+  "rgb_effect": "pulse",
+  "charge_limit": 100,
+  "fan_mode": "quiet"
+}

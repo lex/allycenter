@@ -85,7 +85,7 @@ const BlackScreenOverlay: FC<{ stateManager: DownloadModeState }> = ({
 
 const getDeviceInfo = callable<[], DeviceInfo>("get_device_info");
 const getBatteryInfo = callable<[], BatteryInfo>("get_battery_info");
-const setChargeLimit = callable<[number], boolean>("set_charge_limit");
+// Charge limit is read-only here on purpose - SteamOS owns the setting.
 const getRgbState = callable<[], RgbState>("get_rgb_state");
 const setRgbColor = callable<[string], boolean>("set_rgb_color");
 const setRgbBrightness = callable<[number], boolean>("set_rgb_brightness");
@@ -114,6 +114,9 @@ const setCpuBoostEnabled = callable<[boolean], boolean>(
   "set_cpu_boost_enabled"
 );
 const getFanDiagnostics = callable<[], FanDiagnostics>("get_fan_diagnostics");
+const onResume = callable<[], boolean>("on_resume");
+const getStartupApply = callable<[], StartupApplyInfo>("get_startup_apply");
+const setStartupApply = callable<[boolean], boolean>("set_startup_apply");
 const setUseExternalTdp = callable<[boolean], boolean>("set_use_external_tdp");
 
 interface DeviceInfo {
@@ -199,6 +202,11 @@ interface TdpSettings {
   tdp_override: boolean;
   use_external_tdp: boolean;
   available: boolean;
+}
+
+interface StartupApplyInfo {
+  enabled: boolean;
+  last_attempt_failed: boolean;
 }
 
 interface ChargeLimitInfo {
@@ -427,17 +435,6 @@ const BatteryHealthSection: VFC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  const handleChargeLimitChange = async (value: number) => {
-    setChargeLimitValue(value);
-    const success = await setChargeLimit(value);
-    if (success) {
-      toaster.toast({
-        title: "Ally Center",
-        body: `Charge limit set to ${value}%`,
-      });
-    }
-  };
-
   const getHealthColor = (health: number): string => {
     if (health >= 80) return "#4caf50";
     if (health >= 60) return "#ff9800";
@@ -528,19 +525,17 @@ const BatteryHealthSection: VFC = () => {
                 <span style={valueStyle}>{batteryInfo.temperature}°C</span>
               </div>
             )}
+            {/* Read-only. SteamOS owns this setting and exposes it in its own
+                Settings > Power UI; writing it here silently reverted the user's
+                choice. Shown so the value is visible, not to compete with it. */}
+            <div style={infoRowStyle}>
+              <span style={labelStyle}>Charge Limit</span>
+              <span style={valueStyle}>{chargeLimit}%</span>
+            </div>
+            <div style={{ ...labelStyle, fontSize: "11px", marginTop: "4px" }}>
+              Managed by SteamOS — change it in Settings &gt; Power
+            </div>
           </div>
-
-          <PanelSectionRow>
-            <SliderField
-              label={`Charge Limit: ${chargeLimit}%`}
-              value={chargeLimit}
-              min={60}
-              max={100}
-              step={5}
-              showValue={false}
-              onChange={handleChargeLimitChange}
-            />
-          </PanelSectionRow>
         </div>
       )}
     </PanelSection>
@@ -801,15 +796,30 @@ const PerformanceSection: VFC = () => {
   const [currentFanMode, setCurrentFanMode] = useState("auto");
   const [tdpOverride, setTdpOverrideState] = useState(false);
   const [useExternalTdp, setUseExternalTdpState] = useState(false);
+  const [startupApply, setStartupApplyState] = useState(true);
+  const [startupFailed, setStartupFailed] = useState(false);
+
+  const handleStartupApplyToggle = async (enabled: boolean) => {
+    setStartupApplyState(enabled);
+    const success = await setStartupApply(enabled);
+    if (success) {
+      setStartupFailed(false);
+      toaster.toast({
+        title: "Ally Center",
+        body: `Apply on startup ${enabled ? "enabled" : "disabled"}`,
+      });
+    }
+  };
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [profiles, tdp, fan, tdpSettings] = await Promise.all([
+        const [profiles, tdp, fan, tdpSettings, startup] = await Promise.all([
           getPerformanceProfiles(),
           getCurrentTdp(),
           getFanInfo(),
           getTdpSettings(),
+          getStartupApply(),
         ]);
         setProfilesData(profiles);
         setTdpInfo(tdp);
@@ -817,6 +827,8 @@ const PerformanceSection: VFC = () => {
         setCurrentTdp(tdpSettings.tdp);
         setTdpOverrideState(tdpSettings.tdp_override || false);
         setUseExternalTdpState(tdpSettings.use_external_tdp || false);
+        setStartupApplyState(startup.enabled);
+        setStartupFailed(startup.last_attempt_failed);
       } catch (e) {
         console.error("Failed to get performance data:", e);
       }
@@ -940,6 +952,19 @@ const PerformanceSection: VFC = () => {
           </div>
         </div>
       )}
+
+      <PanelSectionRow>
+        <ToggleField
+          label="Apply On Startup"
+          description={
+            startupFailed
+              ? "Disabled automatically: the last startup apply did not complete. Re-enable to try again."
+              : "Re-apply saved settings to the hardware at boot"
+          }
+          checked={startupApply}
+          onChange={handleStartupApplyToggle}
+        />
+      </PanelSectionRow>
 
       <PanelSectionRow>
         <ToggleField
@@ -1283,6 +1308,21 @@ export default definePlugin(() => {
     <BlackScreenOverlay stateManager={downloadModeState} />
   ));
 
+  // The MCU resets the joystick rings across a suspend/resume cycle, so settings
+  // that were applied before sleep are gone on wake. Re-apply on resume.
+  let resumeRegistration: { unregister: () => void } | undefined;
+  try {
+    resumeRegistration = (
+      window as any
+    ).SteamClient?.System?.RegisterForOnResumeFromSuspend(() => {
+      onResume().catch((e: unknown) =>
+        console.error("Ally Center: resume re-apply failed", e)
+      );
+    });
+  } catch (e) {
+    console.error("Ally Center: could not register resume handler", e);
+  }
+
   return {
     name: "Ally Center",
     title: <div className={staticClasses.Title}>Ally Center</div>,
@@ -1292,6 +1332,7 @@ export default definePlugin(() => {
       console.log("Ally Center plugin unloaded!");
       // Remove the global overlay component when plugin is unloaded
       routerHook.removeGlobalComponent("AllyCenterBlackOverlay");
+      resumeRegistration?.unregister();
       // Ensure download mode is disabled when plugin unloads
       downloadModeState.setActive(false);
     },
