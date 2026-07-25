@@ -113,18 +113,40 @@ Where a default is unset the driver substitutes another value rather than report
 Verified live: removing the charger changed `ppt_pl2_sppt/min_value` from `14` to `13`
 within a few seconds. The ranges really are swapped at runtime.
 
-**Connecting the charger also discards the applied limits.** Observed: with the plugin
-holding 25/31/38, plugging in left `current_value` reading 35/45/55 — the AC maximums.
-On disconnect the values stayed put, so the reset was only seen on connect, but a
-re-apply is warranted in both directions.
+**`current_value` is a driver-side cache, not a live firmware read**, and there is a
+separate cache per power source:
+
+```c
+static ssize_t _attr##_current_value_show(...)
+{
+        struct rog_tunables *tunables = get_current_tunables();
+        return sysfs_emit(buf, "%u\n", tunables->_attr);   /* cached, not WMI */
+}
+```
+
+At probe each set is seeded to `def ?: max`. So after a power-source change,
+`current_value` reports whatever was last written *through that interface for that
+power source* — which may be the seeded default rather than reality.
+
+**Firmware retains the applied limit across a power-source change.** Verified: with the
+plugin stopped, 7W was written while on AC, then the charger was removed with nothing
+re-applying. `current_value` then read `25` (the stale DC cache) while a load test
+measured **1032 MHz / 7.1 W** — the 7W limit was still genuinely in force.
+
+An earlier version of this document claimed plugging in *discarded* the limits, based on
+seeing 35/45/55 after connecting the charger. That was the AC cache's seeded default
+being displayed, not a firmware reset. **Never trust `current_value` after a power-source
+change; measure under load if it matters.**
 
 Consequences:
 
 - Ranges must be read at the moment of writing, not cached at startup
   (`_armoury_range()` does this).
-- Power limits must be **re-applied on charger connect/disconnect**, in the same way
-  they are after resume. The plugin watches `/sys/class/power_supply/AC0/online` in its
-  existing background thread and calls `_reapply_power_limits()` on a change.
+- Power limits are **re-applied on charger connect/disconnect** — not because firmware
+  loses them, but so the driver's per-power-source cache matches what the user
+  configured (otherwise the UI reads the seeded default), and so the value is
+  re-validated against the new range. The plugin watches
+  `/sys/class/power_supply/AC0/online` in its background thread.
 
 ### Limits are per model, too
 
