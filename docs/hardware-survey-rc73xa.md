@@ -26,6 +26,52 @@ Relevant loaded modules:
 | `asus_armoury` | firmware-attributes interface — **authoritative min/max/default** for power limits |
 | `amd_pmf`, `platform_profile` | ACPI platform profile |
 
+## asus_armoury — the firmware-attributes interface
+
+`/sys/class/firmware-attributes/asus-armoury/attributes/` (note: the kernel's own
+deprecation message spells it `firmware_attributes` with an underscore; the real path
+uses a hyphen).
+
+**This is the complete set on this device — six attributes plus `pending_reboot`:**
+
+| Attribute | `current_value` mode | Type | Values | `display_name` |
+|---|---|---|---|---|
+| `ppt_pl1_spl` | 644 | integer | min 7, max 35, default 17, increment 1 | Set the CPU slow package limit |
+| `ppt_pl2_sppt` | 644 | integer | min 13, max 45, default 21, increment 1 | Set the CPU fast package limit |
+| `ppt_pl3_fppt` | 644 | integer | min 19, max 55, default 26, increment 1 | Set the CPU fastest package limit |
+| `boot_sound` | 644 | enumeration | `0;1` | Set the boot POST sound |
+| `mcu_powersave` | 644 | enumeration | `0;1` | Set MCU powersaving mode |
+| `charge_mode` | **444 read-only** | enumeration | `0;1;2` | Show the current mode of charging |
+| `pending_reboot` | 444 read-only | — | currently `0` | standard firmware-attributes flag |
+
+Integer attributes expose `current_value`, `default_value`, `min_value`, `max_value`,
+`scalar_increment`, `type`. Enumerations expose `current_value`, `possible_values`,
+`display_name`, `type`.
+
+Note this is a much smaller set than the `asus_armoury` driver supports generally —
+laptop-oriented attributes (GPU MUX, dGPU disable, panel overdrive, dynamic boost) are
+absent because the hardware has no such features.
+
+### The legacy path is deprecated
+
+The kernel logs, when `/sys/devices/platform/asus-nb-wmi/*` is written:
+
+```
+asus_wmi: Accessing attributes through /sys/bus/platform/asus_wmi is deprecated
+and will be removed in a future release.
+Please switch over to /sys/class/firmware_attributes.
+```
+
+**The plugin currently writes the deprecated path** for `ppt_*`, `boot_sound` and
+`mcu_powersave`. It works today and emits this warning, but it is scheduled for removal.
+Migrating to `<attr>/current_value` under the firmware-attributes class is the
+forward-compatible path, and would also explain the discrepancy below: the two are two
+front-ends onto the same firmware, with the armoury one canonical.
+
+`pending_reboot` gives a way to answer the open question of whether armoury writes
+persist as firmware settings — write a limit through armoury and see whether the flag
+is raised.
+
 ## Power limits (PPT)
 
 Two views of the same firmware, which do **not** report the same current state:
@@ -56,7 +102,8 @@ Also present, no armoury metadata: `ppt_apu_sppt`, `ppt_platform_sppt`.
    appears to reflect only what was written *through armoury*. Treat armoury as
    authoritative for `min_value`/`max_value`/`default_value` metadata, and WMI as the
    runtime state. Whether writing through armoury persists across reboot (as a firmware
-   setting would) is untested — there is no `pending_reboot` indicator on this class.
+   setting would) is untested. `pending_reboot` **does** exist on this class (444,
+   currently `0`) and is the obvious way to test it.
 
 **Verified effective** (8-thread busy loop, 12 s settle, on battery):
 
@@ -110,6 +157,13 @@ PWM values are 0–255, temps in °C.
 
 Note `fan_curve_enable` — which the current plugin references — **does not exist** on
 this model.
+
+**Caution for the custom fan curve feature:** at boot the kernel logs
+`asus_wmi: fan_curve_get_factory_default (0x00110032) failed: -19` (`-ENODEV`). The
+curve device still registers and reports plausible points, but the firmware's factory
+defaults could not be read. The "stock" curve recorded in this document may therefore be
+a driver fallback rather than genuine factory values — relevant to any
+restore-to-defaults implementation.
 
 ## Thermal policy
 
