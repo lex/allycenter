@@ -105,6 +105,15 @@ See `docs/` for the hardware reference and the analysis behind these decisions.
   honest and re-validates against the new range — on AC, `ppt_pl2_sppt`'s minimum is 14
   rather than 13.
 
+- **Fixed RGB not staying off after waking from sleep.** The MCU lights the joystick
+  rings green by itself a few seconds after a resume — its default for when nothing is
+  driving them — and sysfs gives no sign of it, still reporting brightness 0. Writing
+  brightness could not reclaim them (the LED core skips unchanged values, and even a
+  forced nudge was not enough); a real change to `multi_intensity` does, because the
+  driver then resends the whole LED state. Since the MCU acts *after* the resume, the
+  state is re-asserted on a schedule for the first minute. Only affected users who keep
+  RGB switched off — with RGB enabled the colour already returned correctly.
+
 ### Verified on hardware
 
 - Power limits applied through firmware-attributes take effect immediately (a 7W limit

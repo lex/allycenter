@@ -218,6 +218,32 @@ correct.
 `multi_intensity` can be written while `brightness` is 0; it is retained and takes
 effect when brightness is raised.
 
+### The MCU takes the rings back after a resume
+
+Verified by observation, and it defeats the obvious fixes:
+
+- At wake the rings are correctly off. **A few seconds later the MCU lights them
+  green by itself** — the firmware's own default for "nobody is driving these".
+  Nothing in sysfs reflects it: `brightness` still reads `0` while the hardware is lit.
+- It is **not** the last colour set. With red configured and red last written, green
+  still appears. With RGB *enabled* (blue) the colour returns instantly and correctly
+  and **no green appears at all** — so this only affects users who keep their lights off.
+- Writing `brightness` alone does not reclaim the LEDs. The LED core skips the hardware
+  write when the value is unchanged, and even a forced 1→0 nudge was not enough.
+- **Any real change to `multi_intensity` does reclaim them**, because it makes the
+  driver resend the whole LED state, brightness included. Confirmed: with the rings
+  green and `brightness=0`, writing a non-zero intensity turned them off without ever
+  touching brightness.
+- Because the MCU acts *after* the resume, a single re-apply loses. The plugin
+  re-asserts on a schedule (every second for 20s, then tapering to 60s).
+
+When forcing a change, flip the low bit of the colour rather than writing zeros — a
+1/255 step is invisible, whereas blanking first makes a lit ring blink.
+
+The proper fix is the MCU's Aura power states (boot/awake/sleep/shutdown) held in its
+own NVRAM, which is what Armoury Crate sets. See `steamos-overlap.md`; it needs
+asusctl's known-good HID packets rather than guesswork.
+
 **Useful kernel triggers** (would replace polling loops entirely):
 `BAT0-charging`, `BAT0-full`, `BAT0-charging-or-full`, `BAT0-charging-blink-full-solid`,
 `BAT0-charging-orange-full-green`, `AC0-online`, `disk-activity`, `cpu0`…`cpu7`, `panic`.

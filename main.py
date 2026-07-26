@@ -109,6 +109,11 @@ class Plugin:
     # real suspend rather than scheduling jitter.
     RESUME_POLL_SECONDS = 5
     RESUME_MIN_SUSPEND_SECONDS = 10
+    # Seconds after a resume at which to re-assert RGB. The MCU lights the rings
+    # itself a few seconds after wake, invisibly to sysfs, so one apply is not enough.
+    # Dense at the start so the wrong colour is visible for ~a second rather than
+    # several, then sparse to catch a late grab. Each pass is a couple of tiny writes.
+    RESUME_RGB_RETRY_DELAYS = tuple(range(1, 21)) + (23, 26, 30, 40, 50, 60)
     
     async def _main(self):
         """Main entry point for the plugin"""
@@ -266,6 +271,31 @@ class Plugin:
             decky.logger.error(f"Failed to stop effects before suspend: {e}")
             return False
 
+    async def _rgb_resume_retries(self):
+        """Re-assert RGB repeatedly for a short while after waking.
+
+        Observed on RC73XA: at wake the rings are correctly off, then the MCU lights
+        them itself a few seconds later. Nothing in sysfs reflects that - it still
+        reads brightness 0 while the hardware is green - so there is nothing to
+        detect and no event to hook. Re-asserting on a short schedule is the only
+        reliable answer.
+
+        Skipped while an animated effect is running: those threads write the LEDs
+        continuously, which already keeps the MCU from taking over.
+        """
+        previous = 0
+        for delay in self.RESUME_RGB_RETRY_DELAYS:
+            await asyncio.sleep(delay - previous)
+            previous = delay
+
+            if self.effect_running:
+                return
+            try:
+                await self._apply_rgb(quiet=True)
+            except Exception as e:
+                decky.logger.warning(f"RGB resume retry failed: {e}")
+        decky.logger.info("RGB resume re-assert window finished")
+
     async def on_resume(self) -> bool:
         """Re-apply hardware state after waking from suspend.
 
@@ -276,6 +306,9 @@ class Plugin:
         try:
             decky.logger.info("Resumed from suspend, re-applying settings")
             await self._apply_rgb()
+            # The MCU re-lights the rings a few seconds later; keep re-asserting
+            if self.loop:
+                self.loop.create_task(self._rgb_resume_retries())
 
             if not self.settings.get("use_external_tdp"):
                 if self.settings.get("tdp_override"):
@@ -634,7 +667,13 @@ class Plugin:
             self.effect_thread.join(timeout=1.0)
         self.effect_thread = None
 
-    def _set_led_color(self, r: int, g: int, b: int, brightness: int = 255):
+    def _set_led_color(self, r: int, g: int, b: int, brightness: int = 255, force: bool = False):
+        """Set all four zones to one colour.
+
+        `force` pushes the brightness through even when unchanged - needed when
+        re-applying after a resume, but NOT during animations, where nudging every
+        frame would flicker.
+        """
         try:
             brightness_path = os.path.join(ALLY_LED_PATH, "brightness")
             multi_intensity_path = os.path.join(ALLY_LED_PATH, "multi_intensity")
@@ -646,7 +685,9 @@ class Plugin:
                 with open(multi_intensity_path, 'w') as f:
                     f.write(color_str)
             
-            if os.path.exists(brightness_path):
+            if force:
+                self._write_led_brightness(brightness)
+            elif os.path.exists(brightness_path):
                 with open(brightness_path, 'w') as f:
                     f.write(str(brightness))
         except Exception as e:
@@ -764,6 +805,86 @@ class Plugin:
             on = not on
             time.sleep(delay)
 
+    def _write_led_brightness(self, value: int) -> bool:
+        """Write LED brightness, forcing it through to the hardware.
+
+        The kernel's LED core skips the hardware write when the value is unchanged.
+        That breaks re-applying after a suspend: the MCU lights the rings itself
+        while the kernel's cached brightness stays at whatever we last set, so
+        writing the same number again is a no-op and the rings stay lit. When the
+        target already matches the cached value, nudge through a different one first
+        so a real change is pushed to the MCU.
+        """
+        path = os.path.join(ALLY_LED_PATH, "brightness")
+        if not os.path.exists(path):
+            return False
+        try:
+            current = None
+            try:
+                with open(path, 'r') as f:
+                    current = int(f.read().strip())
+            except Exception:
+                pass
+
+            if current == value:
+                # 1/255 is imperceptible, and a momentary 0 is invisible mid-change
+                with open(path, 'w') as f:
+                    f.write("1" if value == 0 else "0")
+
+            with open(path, 'w') as f:
+                f.write(str(value))
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to set LED brightness: {e}")
+            return False
+
+    def _reassert_led_state(self, color_int: int = None) -> bool:
+        """Force a multi_intensity write so the driver pushes LED state to the MCU.
+
+        Across a suspend the MCU lights the rings itself, and the kernel's cached
+        values are unchanged - so re-writing the same brightness is a no-op and the
+        rings stay lit. Verified on hardware: changing *brightness* alone does not
+        reclaim them, but any real change to multi_intensity does, because it makes
+        the driver resend the whole LED state (brightness included).
+
+        Passing a colour is harmless when brightness is 0 - nothing lights up.
+        """
+        path = os.path.join(ALLY_LED_PATH, "multi_intensity")
+        if not os.path.exists(path):
+            return False
+
+        if color_int is None:
+            color = self.settings.get("rgb_color", "#FF0000").lstrip('#')
+            try:
+                color_int = (int(color[0:2], 16) << 16) | (int(color[2:4], 16) << 8) \
+                    | int(color[4:6], 16)
+            except (ValueError, IndexError):
+                color_int = 0xFF0000
+
+        target = " ".join([str(color_int)] * 4)
+        try:
+            current = None
+            try:
+                with open(path, 'r') as f:
+                    current = f.read().strip()
+            except Exception:
+                pass
+
+            # Nudge through a different value so the write is a real change. Flip the
+            # bottom bit of one channel rather than blanking: a 1/255 step is
+            # imperceptible, whereas writing zeros first makes a lit ring blink.
+            if current == target:
+                alt = " ".join([str(color_int ^ 1)] * 4)
+                with open(path, 'w') as f:
+                    f.write(alt)
+
+            with open(path, 'w') as f:
+                f.write(target)
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to reassert LED state: {e}")
+            return False
+
     def _set_led_trigger(self, trigger: str) -> bool:
         """Point the LED at a kernel trigger, or "none" to drive it ourselves.
 
@@ -850,7 +971,7 @@ class Plugin:
             self.effect_thread.start()
             decky.logger.info(f"Started effect: {effect}")
 
-    async def _apply_rgb(self) -> bool:
+    async def _apply_rgb(self, quiet: bool = False) -> bool:
         try:
             if not os.path.exists(ALLY_LED_PATH):
                 decky.logger.warning("Ally LED path not found")
@@ -859,13 +980,15 @@ class Plugin:
             brightness_path = os.path.join(ALLY_LED_PATH, "brightness")
 
             if not self.settings.get("rgb_enabled", True):
-                # Turn off RGB
+                # Turn off RGB. Order matters: the intensity write is what makes the
+                # driver resend LED state to the MCU and reclaim the rings after a
+                # resume; brightness alone is not enough.
                 self._stop_effect()
                 self._set_led_trigger("none")
-                if os.path.exists(brightness_path):
-                    with open(brightness_path, 'w') as f:
-                        f.write("0")
-                decky.logger.info("RGB disabled")
+                self._write_led_brightness(0)
+                self._reassert_led_state()
+                if not quiet:
+                    decky.logger.info("RGB disabled")
                 return True
 
             effect = self.settings.get("rgb_effect", "static")
@@ -873,9 +996,8 @@ class Plugin:
             if effect == "off":
                 self._stop_effect()
                 self._set_led_trigger("none")
-                if os.path.exists(brightness_path):
-                    with open(brightness_path, 'w') as f:
-                        f.write("0")
+                self._write_led_brightness(0)
+                self._reassert_led_state()
                 return True
 
             # Battery state can be driven by the kernel directly, with no polling
@@ -884,9 +1006,7 @@ class Plugin:
                 self._stop_effect()
                 if self._set_led_trigger(BATTERY_LED_TRIGGER):
                     brightness = self.settings.get("rgb_brightness", 100)
-                    if os.path.exists(brightness_path):
-                        with open(brightness_path, 'w') as f:
-                            f.write(str(int(brightness * 255 / 100)))
+                    self._write_led_brightness(int(brightness * 255 / 100))
                     decky.logger.info(f"RGB battery mode via kernel trigger "
                                       f"'{BATTERY_LED_TRIGGER}'")
                     return True
@@ -906,8 +1026,10 @@ class Plugin:
                 b = int(color[4:6], 16)
                 hw_brightness = int(brightness * 255 / 100)
                 
-                self._set_led_color(r, g, b, hw_brightness)
-                decky.logger.info(f"Set static RGB: #{color} @ {brightness}%")
+                self._reassert_led_state((r << 16) | (g << 8) | b)
+                self._set_led_color(r, g, b, hw_brightness, force=True)
+                if not quiet:
+                    decky.logger.info(f"Set static RGB: #{color} @ {brightness}%")
             else:
                 # Start animated effect
                 self._start_effect(effect)
